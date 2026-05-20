@@ -1,0 +1,7 @@
+data/
+model_retrained_3per/
+unlearning_output/
+*.zip
+*.bin
+*.pycache/
+.DS_Store
