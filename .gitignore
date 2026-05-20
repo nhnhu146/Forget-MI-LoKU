@@ -1,6 +1,7 @@
 data/
 model_retrained_3per/
 unlearning_output/
+efficient-llm-unlearning-main/efficient-llm-unlearning-main/
 *.zip
 *.bin
 *.pycache/
