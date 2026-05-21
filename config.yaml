@@ -1,4 +1,4 @@
-program: training/forgetmi_partial.py
+program: training/forgetmi_loku.py
 method: random
 parameters:
   project:
@@ -99,6 +99,8 @@ parameters:
     value: false
   use_all_data: 
     value: false
+  use_all_data: 
+    value: false
   use_pretrained_checkpoint: 
     value: false
   print_predictions: 
@@ -113,47 +115,6 @@ parameters:
     value: 1 
 command:
   - ${env:PYTHON}
-  - ./forgetmi_partial.py
-  - --unlearn_epochs=${unlearn_epochs}
-  - --random_model_path=${random_model_path}
-  - --forget_set_path=${forget_set_path}
-  - --data_split_path=${data_split_path}
-  - --output_dir=${output_dir}
-  - --output_channel_encoding=${output_channel_encoding}
-  - --text_data_dir=${text_data_dir}
-  - --img_data_dir=${img_data_dir}
-  - --synonyms_dir=${synonyms_dir}
-  - --reprocess_input_data=${reprocess_input_data}
-  - --base_model_path=${base_model_path}
-  - --retrained_model_path=${retrained_model_path}
-  - --bert_pretrained_dir=${bert_pretrained_dir}
-  - --do_train
-  - --overwrite_output_dir
-  - --max_seq_length=${max_seq_length}
-  - --text_noise_level=${text_noise_level}
-  - --random_seed=${random_seed}
-  - --learning_rate=${learning_rate}
-  - --weight_decay=${weight_decay}
-  - --scheduler=${scheduler}
-  - --warmup_proportion=${warmup_proportion}
-  - --eval_batch_size=${eval_batch_size}
-  - --unlearn_batch_size=${unlearn_batch_size}
-  - --noise_mean=${noise_mean}
-  - --noise_std=${noise_std}
-  - --alpha=${alpha}
-  - --beta=${beta}
-  - --theta=${theta}
-  - --gamma=${gamma}
-  - --bert_pool_last_hidden=${bert_pool_last_hidden}
-  - --bert_pool_use_img=${bert_pool_use_img}
-  - --bert_pool_img_lowerlevel=${bert_pool_img_lowerlevel}
-  - --training_mode=${training_mode}
-  - --semisupervised_training_data=${semisupervised_training_data}
-  - --use_masked_txt=${use_masked_txt}
-  - --use_all_data=${use_all_data}
-  - --use_pretrained_checkpoint=${use_pretrained_checkpoint}
-  - --print_predictions=${print_predictions}
-  - --print_embeddings=${print_embeddings}
-  - --num_cpu_workers=${num_cpu_workers}
-  - --logging_steps=${logging_steps}
-  - --save_epochs=${save_epochs}
+  - training/forgetmi_loku.py
+  - --config=config.yaml
+
