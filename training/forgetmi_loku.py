@@ -376,6 +376,22 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optim
                 print("Early stopping triggered.")
                 break
 
+def ensure_model_path(path, description="model"):
+    if os.path.exists(os.path.join(path, "pytorch_model.bin")):
+        return path
+    print(f"⚠️ {description} not found at {path}. Searching for pytorch_model.bin...")
+    import glob
+    # Search in common Colab locations
+    matches = glob.glob(f"/content/**/pytorch_model.bin", recursive=True)
+    if matches:
+        # Avoid picking up checkpoints or temp files
+        valid_matches = [m for m in matches if "checkpoint" not in m and "extract_temp" not in m]
+        if valid_matches:
+            new_path = os.path.dirname(valid_matches[0])
+            print(f"✅ Found {description} at: {new_path}")
+            return new_path
+    return path
+
 def main():
     import yaml
     import argparse
@@ -398,11 +414,16 @@ def main():
     set_seed(config.random_seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 1. Load Original Model
-    model_og = ImageTextModel.from_pretrained(config.base_model_path).to(device)
+    # 1. Load Original Model (With Auto-Discovery)
+    base_path = ensure_model_path(config.base_model_path, "Base Model")
+    model_og = ImageTextModel.from_pretrained(base_path).to(device)
     model_unlearn = copy.deepcopy(model_og)
-    model_re = ImageTextModel.from_pretrained(config.retrained_model_path).to(device)
-    tokenizer = BertTokenizer.from_pretrained(config.bert_pretrained_dir)
+    
+    re_path = ensure_model_path(config.retrained_model_path, "Retrained Model")
+    model_re = ImageTextModel.from_pretrained(re_path).to(device)
+    
+    # Tokenizer usually in the same dir as base model
+    tokenizer = BertTokenizer.from_pretrained(base_path if os.path.exists(os.path.join(base_path, "vocab.txt")) else config.bert_pretrained_dir)
 
     # 2. Build Dataset
     dataset, num_labels = build_dataset(config, tokenizer)
