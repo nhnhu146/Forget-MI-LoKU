@@ -107,7 +107,7 @@ def remove_keywords(text, max_removals=2):
     #Top 10 Keywords: [('atelectasis', 5), ('lung', 5), ('edema', 4), ('cardiomegaly', 3), ('silhouette', 3), ('pneumothorax', 3), ('markings', 3), ('disease', 3), ('NUMBER', 3), ('chest', 2)]
     keywords = ["atelectasis", "lung", "edema", "cardiomegaly", "silhouette", "pneumothorax", "markings", "disease", "NUMBER", "chest"]
     # Check which keywords exist in the text
-    existing_keywords = [word for word, _ in keywords if re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE)]
+    existing_keywords = [word for word in keywords if re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE)]
     print("\n Existing Keywords:", existing_keywords)
     
     # If no keywords are found, return the text as-is
