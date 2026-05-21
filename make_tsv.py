@@ -41,10 +41,11 @@ with open(output_file, "w", encoding="utf-8", newline="") as f:
     for root, dirs, files in os.walk(text_data_dir):
         for file in files:
             if file.endswith(".txt"):
-                scanned += 1
-                report_id = file.replace(".txt", "") # vd: s50414267 hoặc 50414267
-                
-                if report_id in study_to_label:
+            scanned += 1
+            report_id = file.replace(".txt", "").replace("s", "") # vd: s50414267 -> 50414267
+
+            if report_id in study_to_label:
+
                     label = study_to_label[report_id]
                     file_path = os.path.join(root, file)
                     try:

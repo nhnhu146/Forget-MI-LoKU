@@ -160,8 +160,16 @@ def build_dataset(args, tokenizer, image_noise_params=None):
         ('forget', frg_ids, frg_l, train_trans, all_txt),
         ('random', rnd_ids, rnd_l, train_trans, noisy_txt)
     ]:
-        tk, mk, sg, lb = extract(txt_map, ids.values())
-        datasets[name] = CXRImageTextDataset(args.id, tk, mk, sg, lb, ids, labels, args.img_data_dir, labels, transform=trans, output_channel_encoding=args.output_channel_encoding)
+        # Filter to keep only those that exist in txt_map to avoid KeyError
+        valid_dicom_ids = [d_id for d_id, r_id in ids.items() if r_id in txt_map]
+        if len(valid_dicom_ids) < len(ids):
+            print(f"⚠️ Warning: {len(ids) - len(valid_dicom_ids)} items in '{name}' set skipped because their text reports were not found.")
+        
+        f_ids = {d_id: ids[d_id] for d_id in valid_dicom_ids}
+        f_labels = {d_id: labels[d_id] for d_id in valid_dicom_ids}
+
+        tk, mk, sg, lb = extract(txt_map, f_ids.values())
+        datasets[name] = CXRImageTextDataset(args.id, tk, mk, sg, lb, f_ids, f_labels, args.img_data_dir, f_labels, transform=trans, output_channel_encoding=args.output_channel_encoding)
     
     return datasets, num_labels
 
