@@ -4,9 +4,18 @@ import time
 import re
 import pandas as pd
 
-text_data_dir = "./data/text_data" 
 output_dir = "./data/metadata"
 split_csv_path = "./data_splits/mimic-cxr-sub-img-edema-split-manualtest.csv"
+
+# Auto-detect text_data directory (handles nested zip extraction)
+if os.path.isdir("./data/text_data"):
+    text_data_dir = "./data/text_data"
+elif os.path.isdir("./data/data/text_data"):
+    text_data_dir = "./data/data/text_data"
+else:
+    print("❌ Không tìm thấy thư mục text_data! Hãy kiểm tra lại việc giải nén data.zip.")
+    exit()
+print(f"📂 Sử dụng text_data tại: {text_data_dir}")
 
 # 1. ĐỌC FILE SPLIT ĐỂ LẤY MAPPING STUDY_ID -> SEVERITY
 study_to_label = {}

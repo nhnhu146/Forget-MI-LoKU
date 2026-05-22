@@ -213,6 +213,9 @@ def compute_importance(model, dataloader, device, target_modules, max_samples=51
         
         samples += batch[0].size(0)
 
+    if samples == 0:
+        print("⚠️ Warning: No samples processed for importance computation. Check your dataset.")
+        return importance  # Return zero-filled importance
     return {k: v / samples for k, v in importance.items()}
 
 def apply_loku_svd(model, forget_importance, retain_importance, target_modules, r, lora_alpha):
@@ -238,8 +241,20 @@ def apply_loku_svd(model, forget_importance, retain_importance, target_modules, 
         W = base_layer.weight.data.float()
         # Row-wise importance scaling for SVD
         row_imp = imp.mean(dim=1).sqrt()
+        # Add small regularization to prevent ill-conditioned matrix
+        row_imp = row_imp + 1e-6
         
-        U, S, V = torch.svd_lowrank(row_imp[:, None] * W, q=r)
+        scaled_W = row_imp[:, None] * W
+        try:
+            U, S, V = torch.svd_lowrank(scaled_W, q=r)
+        except Exception as e:
+            print(f"⚠️ svd_lowrank failed for {name}: {e}. Falling back to full SVD with regularization.")
+            # Add regularization: small identity-like noise
+            noise = torch.randn_like(scaled_W) * 1e-4
+            U_full, S_full, Vh_full = torch.linalg.svd(scaled_W + noise, full_matrices=False)
+            U = U_full[:, :r]
+            S = S_full[:r]
+            V = Vh_full[:r, :].t()
         
         # Initialize LoRA
         S_sqrt = torch.sqrt(S)
