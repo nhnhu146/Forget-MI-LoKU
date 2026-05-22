@@ -205,6 +205,8 @@ class EdemaClassificationProcessor(DataProcessor):
         """Creates examples for the training and dev sets."""
         examples = []
         for (i, line) in enumerate(lines):
+            if i == 0 or len(line) == 0:
+                continue
             guid = "%s-%s" % (set_type, i)
 
             text_a = line[-1]
@@ -233,7 +235,7 @@ class EdemaClassificationProcessor(DataProcessor):
             # 2. Xử lý thông minh: 
             # Nếu đọc file chuẩn 4 cột của tác giả
             if len(line) >= 3:
-                labels = [char for char in line[1]]
+                labels = line[1]  # Keep as string for multiclass mode
                 report_id = line[2]
             # Nếu đọc file 2 cột do chúng ta tự làm
             else:
