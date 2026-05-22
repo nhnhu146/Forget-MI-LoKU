@@ -400,19 +400,38 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optim
                 break
 
 def ensure_model_path(path, description="model"):
+    # 1. Check the exact path
     if os.path.exists(os.path.join(path, "pytorch_model.bin")):
         return path
-    print(f"⚠️ {description} not found at {path}. Searching for pytorch_model.bin...")
+    
+    print(f"⚠️ {description} not found at {path}. Searching...")
+    
+    # 2. Check nested subdirectories (handles double-nested zip extraction)
     import glob
-    # Search in common Colab locations
+    nested = glob.glob(os.path.join(path, "**", "pytorch_model.bin"), recursive=True)
+    if nested:
+        found = os.path.dirname(nested[0])
+        print(f"✅ Found {description} (nested) at: {found}")
+        return found
+    
+    # 3. Broad search with keyword matching from original path
+    base_name = os.path.basename(path.rstrip('/'))  # e.g. "training_original_model"
     matches = glob.glob(f"/content/**/pytorch_model.bin", recursive=True)
     if matches:
-        # Avoid picking up checkpoints or temp files
-        valid_matches = [m for m in matches if "checkpoint" not in m and "extract_temp" not in m]
-        if valid_matches:
-            new_path = os.path.dirname(valid_matches[0])
-            print(f"✅ Found {description} at: {new_path}")
-            return new_path
+        # Prefer matches containing the expected folder name
+        keyword_matches = [m for m in matches if base_name in m and "checkpoint" not in m]
+        if keyword_matches:
+            found = os.path.dirname(keyword_matches[0])
+            print(f"✅ Found {description} at: {found}")
+            return found
+        # Last resort: any match excluding checkpoints
+        valid = [m for m in matches if "checkpoint" not in m and "extract_temp" not in m]
+        if valid:
+            found = os.path.dirname(valid[0])
+            print(f"⚠️ Found fallback {description} at: {found} (may not be correct)")
+            return found
+    
+    print(f"❌ Could not find {description} anywhere!")
     return path
 
 def main():

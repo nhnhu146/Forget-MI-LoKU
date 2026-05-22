@@ -239,8 +239,8 @@ class EdemaClassificationProcessor(DataProcessor):
                 report_id = line[2]
             # Nếu đọc file 2 cột do chúng ta tự làm
             else:
-                labels = ['0'] # Gắn nhãn giả (an toàn cho unlearning)
-                report_id = line[0] # Cột đầu tiên chính là ID
+                labels = '0'  # Nhãn giả (an toàn cho unlearning)
+                report_id = line[0]  # Cột đầu tiên chính là ID
                 
             examples.append(
                 InputExample(

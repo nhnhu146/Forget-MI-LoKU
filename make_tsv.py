@@ -1,28 +1,31 @@
+"""
+Tiền xử lý dữ liệu: Gộp các file báo cáo lâm sàng (.txt) thành file all_data.tsv.
+Cách dùng: python make_tsv.py
+"""
 import os
 import csv
 import time
-import re
 import pandas as pd
 
-output_dir = "./data/metadata"
-split_csv_path = "./data_splits/mimic-cxr-sub-img-edema-split-manualtest.csv"
+# --- CONFIG ---
+OUTPUT_DIR = "./data/metadata"
+SPLIT_CSV = "./data_splits/mimic-cxr-sub-img-edema-split-manualtest.csv"
 
-# Auto-detect text_data directory (handles nested zip extraction)
-if os.path.isdir("./data/text_data"):
-    text_data_dir = "./data/text_data"
-elif os.path.isdir("./data/data/text_data"):
-    text_data_dir = "./data/data/text_data"
-else:
-    print("❌ Không tìm thấy thư mục text_data! Hãy kiểm tra lại việc giải nén data.zip.")
-    exit()
-print(f"📂 Sử dụng text_data tại: {text_data_dir}")
+# Auto-detect text_data directory (xử lý cả trường hợp thư mục lồng)
+CANDIDATE_DIRS = ["./data/text_data", "./data/data/text_data"]
+TEXT_DATA_DIR = next((d for d in CANDIDATE_DIRS if os.path.isdir(d)), None)
 
-# 1. ĐỌC FILE SPLIT ĐỂ LẤY MAPPING STUDY_ID -> SEVERITY
+if TEXT_DATA_DIR is None:
+    print("❌ Không tìm thấy thư mục text_data! Hãy chạy setup_data.py trước.")
+    exit(1)
+print(f"📂 Sử dụng text_data tại: {TEXT_DATA_DIR}")
+
+
+# --- 1. ĐỌC MAPPING STUDY_ID -> SEVERITY ---
 study_to_label = {}
 print("Đang đọc file split để lấy mapping study_id -> severity...")
 try:
-    df = pd.read_csv(split_csv_path)
-    # study_id, edeme_severity
+    df = pd.read_csv(SPLIT_CSV)
     for _, row in df.iterrows():
         sid = str(int(row['study_id']))
         label = str(int(row['edeme_severity']))
@@ -30,45 +33,44 @@ try:
         study_to_label[f"s{sid}"] = label
     print(f"Đã nạp {len(study_to_label)} mapping study_id vào bộ nhớ.")
 except Exception as e:
-    print(f"Lỗi khi đọc file split: {e}")
-    exit()
+    print(f"❌ Lỗi khi đọc file split: {e}")
+    exit(1)
 
-# 2. BẮT ĐẦU TÌM VÀ GỘP
-os.makedirs(output_dir, exist_ok=True)
-output_file = os.path.join(output_dir, "all_data.tsv")
+
+# --- 2. GỘP FILE TEXT THÀNH TSV ---
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+output_file = os.path.join(OUTPUT_DIR, "all_data.tsv")
 
 print("Đang gộp file văn bản thành all_data.tsv...")
 start_time = time.time()
 
 with open(output_file, "w", encoding="utf-8", newline="") as f:
     writer = csv.writer(f, delimiter="\t")
-    # Tiêu đề cột
     writer.writerow(["index", "label", "report_id", "text"])
     
     count = 0
     scanned = 0
-    for root, dirs, files in os.walk(text_data_dir):
+    for root, dirs, files in os.walk(TEXT_DATA_DIR):
         for file in files:
-            if file.endswith(".txt"):
-                scanned += 1
-                # Chuẩn hóa ID: bỏ đuôi .txt và bỏ chữ 's' để khớp với CSV
-                report_id = file.replace(".txt", "").replace("s", "")
-                
-                if report_id in study_to_label:
-                    label = study_to_label[report_id]
-                    file_path = os.path.join(root, file)
-                    try:
-                        with open(file_path, "r", encoding="utf-8") as tf:
-                            text = tf.read().replace("\n", " ").replace("\r", " ").replace("\t", " ").strip()
-                        # Format: [index, label, report_id, text]
-                        writer.writerow([count, label, report_id, text])
-                        count += 1
-                    except Exception as e:
-                        pass
-                
-                if scanned % 20000 == 0:
-                    print(f"Đã quét {scanned} file... (Khớp {count} báo cáo)")
+            if not file.endswith(".txt"):
+                continue
+            scanned += 1
+            # Chuẩn hóa ID: bỏ đuôi .txt và bỏ chữ 's' để khớp với CSV
+            report_id = file.replace(".txt", "").replace("s", "")
+            
+            if report_id in study_to_label:
+                file_path = os.path.join(root, file)
+                try:
+                    with open(file_path, "r", encoding="utf-8") as tf:
+                        text = tf.read().replace("\n", " ").replace("\r", " ").replace("\t", " ").strip()
+                    writer.writerow([count, study_to_label[report_id], report_id, text])
+                    count += 1
+                except Exception:
+                    pass
+            
+            if scanned % 20000 == 0:
+                print(f"  Đã quét {scanned} file... (Khớp {count} báo cáo)")
 
-end_time = time.time()
-print(f"HOÀN THÀNH! Đã trích xuất {count} báo cáo trong {round(end_time - start_time, 2)} giây.")
-print(f"File TSV đã được lưu tại: {output_file}")
+elapsed = round(time.time() - start_time, 2)
+print(f"✅ HOÀN THÀNH! Đã trích xuất {count} báo cáo trong {elapsed} giây.")
+print(f"   File TSV: {output_file}")
