@@ -169,7 +169,7 @@ def build_dataset(args, tokenizer, image_noise_params=None):
         f_labels = {d_id: labels[d_id] for d_id in valid_dicom_ids}
 
         tk, mk, sg, lb = extract(txt_map, f_ids.values())
-        datasets[name] = CXRImageTextDataset(args.id, tk, mk, sg, lb, f_ids, f_labels, args.img_data_dir, f_labels, transform=trans, output_channel_encoding=args.output_channel_encoding)
+        datasets[name] = CXRImageTextDataset(args.id, tk, mk, sg, lb, f_ids, f_labels, args.img_data_dir, args.data_split_path, transform=trans, output_channel_encoding=args.output_channel_encoding)
     
     return datasets, num_labels
 
