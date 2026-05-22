@@ -180,9 +180,9 @@ def get_model_inputs(args, batch, device):
         'input_ids': txt_ids.to(device),
         'attention_mask': txt_mask.to(device),
         'token_type_ids': txt_segment_ids.to(device),
-        'bert_pool_last_hidden': args.bert_pool_last_hidden,
-        'bert_pool_use_img': args.bert_pool_use_img,
-        'bert_pool_img_lowerlevel': args.bert_pool_img_lowerlevel
+        'bert_pool_last_hidden': getattr(args, 'bert_pool_last_hidden', False),
+        'bert_pool_use_img': getattr(args, 'bert_pool_use_img', False),
+        'bert_pool_img_lowerlevel': getattr(args, 'bert_pool_img_lowerlevel', False)
     }
     return inputs, label_raw.to(device), report_id.to(device)
 
