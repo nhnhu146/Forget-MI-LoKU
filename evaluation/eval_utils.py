@@ -21,7 +21,7 @@ def get_probability_measure(args, model_ul, model_og, retain_dataloader, device=
 
     similarities = []
 
-    with torch.no_grad():
+    with torch.no_grad(), torch.autocast(device_type='cuda'):
         for batch in retain_dataloader:
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
 
@@ -30,8 +30,8 @@ def get_probability_measure(args, model_ul, model_og, retain_dataloader, device=
             outputs_ul = model_ul(**inputs)
             outputs_og = model_og(**inputs)
 
-            logits_ul = outputs_ul[1]
-            logits_og = outputs_og[1]
+            logits_ul = outputs_ul[1].float()
+            logits_og = outputs_og[1].float()
 
             similarity = F.cosine_similarity(logits_ul, logits_og, dim=1)
             similarities.append(similarity.cpu().numpy())

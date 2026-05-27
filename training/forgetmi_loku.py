@@ -339,10 +339,14 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optim
             f_in, _, _ = get_model_inputs(args, f_batch, device)
             rnd_in, _, _ = get_model_inputs(args, r_batch, device)
 
-            # 2. Model Outputs — model_og is frozen, use no_grad to save memory
-            with torch.no_grad():
+            # 2. Model Outputs — model_og is fp16 frozen, use autocast + no_grad
+            with torch.no_grad(), torch.autocast(device_type='cuda'):
                 og_ret_img_emb, _, og_ret_txt_emb, _ = model_og(**ret_in)[:4]
                 og_rnd_img_emb, _, og_rnd_txt_emb, _ = model_og(**rnd_in)[:4]
+            og_ret_img_emb = og_ret_img_emb.float()
+            og_ret_txt_emb = og_ret_txt_emb.float()
+            og_rnd_img_emb = og_rnd_img_emb.float()
+            og_rnd_txt_emb = og_rnd_txt_emb.float()
             
             ul_ret_img_emb, _, ul_ret_txt_emb, _ = model_ul(**ret_in)[:4]
             ul_frg_img_emb, _, ul_frg_txt_emb, _ = model_ul(**f_in)[:4]
@@ -473,7 +477,7 @@ def main():
 
     # 1. Load Original Model (With Auto-Discovery)
     base_path = ensure_model_path(config.base_model_path, "Base Model")
-    model_og = ImageTextModel.from_pretrained(base_path).to(device).half()  # fp16 to save ~50% VRAM
+    model_og = ImageTextModel.from_pretrained(base_path).to(device)         # fp32 initially for compute_importance
     model_unlearn = ImageTextModel.from_pretrained(base_path).to(device)    # fp32 for training precision
     
     re_path = ensure_model_path(config.retrained_model_path, "Retrained Model")
@@ -488,9 +492,12 @@ def main():
     # 3. LoKU PRE-TRAINING PHASE
     target_modules = ["query", "value", "fc1"]
     
-    # Calculate Importance
+    # Calculate Importance (needs fp32 model)
     f_imp = compute_importance(model_og, DataLoader(dataset['forget'], batch_size=config.unlearn_batch_size), device, target_modules)
     r_imp = compute_importance(model_og, DataLoader(dataset['retain'], batch_size=config.unlearn_batch_size), device, target_modules, max_samples=len(dataset['forget'])*2)
+    
+    # Convert model_og to fp16 after importance computation to save VRAM during training
+    model_og = model_og.half()
 
     # Apply PEFT
     peft_config = LoraConfig(
