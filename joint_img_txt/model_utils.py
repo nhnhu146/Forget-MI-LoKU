@@ -25,6 +25,10 @@ import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss, MSELoss, BCEWithLogitsLoss
 
+# Allow loading truncated images (some dataset images may be slightly corrupted)
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 from transformers import BertPreTrainedModel
 from transformers import BertModel
 
