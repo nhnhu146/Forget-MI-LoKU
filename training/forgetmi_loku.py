@@ -322,6 +322,8 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optim
     best_loss = float('inf')
     patience_counter = 0
     patience = 5
+    margin_ukr = None
+    margin_mkr = None
 
     for epoch in range(start_epoch, args.unlearn_epochs):
         model_ul.train()
@@ -371,12 +373,12 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optim
             L_ukr = euclidean_distance(ul_ret_concat, og_ret_concat).mean()
             L_mkr = euclidean_distance(ul_ret_joint, og_ret_joint).mean()
 
-            # Hinge
-            if epoch == 0 and steps == 0:
+            # Hinge — initialize on first step (handles checkpoint resume)
+            if margin_ukr is None:
                 margin_ukr = (L_ukr + 1).detach()
                 margin_mkr = (L_mkr + 1).detach()
             
-            if epoch > 0:
+            if epoch > 0 or start_epoch > 0:
                 L_ukr = torch.minimum(L_ukr, margin_ukr)
                 L_mkr = torch.minimum(L_mkr, margin_mkr)
 
