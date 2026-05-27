@@ -9,7 +9,7 @@ from scipy.special import softmax
 from scipy.stats import logistic
 from joint_img_txt.metrics import compute_auc, compute_mse, get_acc_f1
 
-from training.forgetme_partial import get_model_inputs
+from training.forgetmi_partial import get_model_inputs
 
 
 def get_probability_measure(args, model_ul, model_og, retain_dataloader, device="cuda"):
