@@ -309,7 +309,7 @@ class ImageTextModel(nn.Module):
     def forward(self, input_img, input_ids, token_type_ids=None, attention_mask=None, 
                 labels=None, position_ids=None, head_mask=None,
                 bert_pool_last_hidden=False, bert_pool_use_img=False, 
-                bert_pool_img_lowerlevel=False, output_img_txt_attn=False):
+                bert_pool_img_lowerlevel=False, output_img_txt_attn=False, **kwargs):
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
