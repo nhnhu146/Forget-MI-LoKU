@@ -178,96 +178,97 @@ def parse_args():
     return parser.parse_args()
 
 
-args = parse_args()
+if __name__ == '__main__':
+    args = parse_args()
 
-# ---------- SET RANDOM SEED -------
-set_seed(args.random_seed)
-torch.cuda.empty_cache()
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Device: {device}")
+    # ---------- SET RANDOM SEED -------
+    set_seed(args.random_seed)
+    torch.cuda.empty_cache()
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
 
-# ---------- LOAD UNLEARNED MODEL AND TOKENIZER -------
-config_path = f"{args.config}"
-with open(config_path, "r") as config_file:
-    config = json.load(config_file)
-text_model_config = BertConfig.from_dict(config)
+    # ---------- LOAD UNLEARNED MODEL AND TOKENIZER -------
+    config_path = f"{args.config}"
+    with open(config_path, "r") as config_file:
+        config = json.load(config_file)
+    text_model_config = BertConfig.from_dict(config)
 
-model_ul = ImageTextModel(text_model_config).to(device)
+    model_ul = ImageTextModel(text_model_config).to(device)
 
-model_ul.load_state_dict(torch.load(args.base_model_path, map_location=device))
-model_ul.to(device)
+    model_ul.load_state_dict(torch.load(args.base_model_path, map_location=device))
+    model_ul.to(device)
 
-model_ul.eval()
+    model_ul.eval()
 
-tokenizer = BertTokenizer.from_pretrained(args.bert_pretrained_dir)
+    tokenizer = BertTokenizer.from_pretrained(args.bert_pretrained_dir)
 
-# ---------- BUILD DATASET AND CREATE LOADER-------
-dataset, num_labels = build_dataset(args, tokenizer)
-retain_set, val_set, rand_set, forget_set, test_set = (
-    dataset["retain"],
-    dataset["validation"],
-    dataset["random"],
-    dataset["forget"],
-    dataset["test"],
-)
-# ---------- RUN MIA -----------
-mia_score_losses = run_mia(
-    retain_set,
-    test_set,
-    forget_set,
-    model_ul,
-    device,
-    args.batch_size,
-    args.base_model_path,
-)
-print(f"MIA Score (Losses): {mia_score_losses}")
+    # ---------- BUILD DATASET AND CREATE LOADER-------
+    dataset, num_labels = build_dataset(args, tokenizer)
+    retain_set, val_set, rand_set, forget_set, test_set = (
+        dataset["retain"],
+        dataset["validation"],
+        dataset["random"],
+        dataset["forget"],
+        dataset["test"],
+    )
+    # ---------- RUN MIA -----------
+    mia_score_losses = run_mia(
+        retain_set,
+        test_set,
+        forget_set,
+        model_ul,
+        device,
+        args.batch_size,
+        args.base_model_path,
+    )
+    print(f"MIA Score (Losses): {mia_score_losses}")
 
-# ---------- SIMILIARITY MEASURE -------
-model_re = ImageTextModel.from_pretrained(args.retrained_model_path).to(device)
-model_re.eval()
-retain_data_loader = DataLoader(retain_set, batch_size=args.batch_size, shuffle=False)
-similarity_measure = get_probability_measure(
-    args, model_ul, model_re, retain_data_loader, device
-)
-print(f"Similarity measure between original and retrained model: {similarity_measure}")
+    # ---------- SIMILIARITY MEASURE -------
+    model_re = ImageTextModel.from_pretrained(args.retrained_model_path).to(device)
+    model_re.eval()
+    retain_data_loader = DataLoader(retain_set, batch_size=args.batch_size, shuffle=False)
+    similarity_measure = get_probability_measure(
+        args, model_ul, model_re, retain_data_loader, device
+    )
+    print(f"Similarity measure between original and retrained model: {similarity_measure}")
 
-# ---------- PERFORMANCE -------
-print("Test set:")
-test_data_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
-test_metrics = compute_metrics(model_ul, test_data_loader, device, args)
+    # ---------- PERFORMANCE -------
+    print("Test set:")
+    test_data_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
+    test_metrics = compute_metrics(model_ul, test_data_loader, device, args)
 
-print("Forget set:")
-forget_data_loader = DataLoader(forget_set, batch_size=args.batch_size, shuffle=False)
-forget_metrics = compute_metrics(model_ul, forget_data_loader, device, args)
+    print("Forget set:")
+    forget_data_loader = DataLoader(forget_set, batch_size=args.batch_size, shuffle=False)
+    forget_metrics = compute_metrics(model_ul, forget_data_loader, device, args)
 
-# ---------- SAVE -------
-output_data = {
-    "BaseModelPaths": args.base_model_path,
-    "1-SimilarityMeasure": round(1 - similarity_measure, 3),
-    "MIA_Losses": round(mia_score_losses, 3),
-    "Forget_AUC": (
-        round(np.mean(forget_metrics["AUC"]), 3) if "AUC" in forget_metrics else None
-    ),
-    "Forget_Macro_F1": (
-        round(forget_metrics["Macro F1"], 3) if "Macro F1" in forget_metrics else None
-    ),
-    "Test_AUC": (
-        round(np.mean(test_metrics["AUC"]), 3) if "AUC" in test_metrics else None
-    ),
-    "Test_Macro_F1": (
-        round(test_metrics["Macro F1"], 3) if "Macro F1" in test_metrics else None
-    ),
-    "Forget Pairwise AUC": forget_metrics["Pairwise AUC"],
-    "Test Pairwise AUC": test_metrics["Pairwise AUC"],
-    "Forget F1": forget_metrics["F1"],
-    "Test F1": test_metrics["F1"],
-}
+    # ---------- SAVE -------
+    output_data = {
+        "BaseModelPaths": args.base_model_path,
+        "1-SimilarityMeasure": round(1 - similarity_measure, 3),
+        "MIA_Losses": round(mia_score_losses, 3),
+        "Forget_AUC": (
+            round(np.mean(forget_metrics["AUC"]), 3) if "AUC" in forget_metrics else None
+        ),
+        "Forget_Macro_F1": (
+            round(forget_metrics["Macro F1"], 3) if "Macro F1" in forget_metrics else None
+        ),
+        "Test_AUC": (
+            round(np.mean(test_metrics["AUC"]), 3) if "AUC" in test_metrics else None
+        ),
+        "Test_Macro_F1": (
+            round(test_metrics["Macro F1"], 3) if "Macro F1" in test_metrics else None
+        ),
+        "Forget Pairwise AUC": forget_metrics["Pairwise AUC"],
+        "Test Pairwise AUC": test_metrics["Pairwise AUC"],
+        "Forget F1": forget_metrics["F1"],
+        "Test F1": test_metrics["F1"],
+    }
 
-output_file = os.path.join(args.output_dir, f"mia_score_{args.id}.csv")
-os.makedirs(args.output_dir, exist_ok=True)
-with open(output_file, "w", newline="") as csvfile:
-    writer = csv.writer(csvfile)
-    writer.writerow(output_data.keys())
-    writer.writerow(output_data.values())
-print(f"Results saved to {output_file}")
+    output_file = os.path.join(args.output_dir, f"mia_score_{args.id}.csv")
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(output_file, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(output_data.keys())
+        writer.writerow(output_data.values())
+    print(f"Results saved to {output_file}")
