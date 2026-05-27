@@ -304,13 +304,12 @@ def load_latest_checkpoint(output_dir, model_ul, gates, optimizer):
 def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optimizer, scheduler, dataset, alpha, beta, theta, gamma):
     start_epoch = load_latest_checkpoint(output_dir, model_ul, gates, optimizer) + 1
     
-    # Memory optimization: move model_re to CPU (only needed for eval at end of epoch)
-    model_re.cpu()
-    torch.cuda.empty_cache()
-    
-    # Freeze model_og — no gradients needed
+    # Freeze frozen models — no gradients needed
     model_og.eval()
+    model_re.eval()
     for p in model_og.parameters():
+        p.requires_grad = False
+    for p in model_re.parameters():
         p.requires_grad = False
 
     num_workers = min(getattr(args, 'num_cpu_workers', 2), 2)  # Colab recommended max is 2
@@ -370,12 +369,12 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optim
 
             # Hinge
             if epoch == 0 and steps == 0:
-                args.margin_ukr = (L_ukr + 1).detach()
-                args.margin_mkr = (L_mkr + 1).detach()
+                margin_ukr = (L_ukr + 1).detach()
+                margin_mkr = (L_mkr + 1).detach()
             
             if epoch > 0:
-                L_ukr = torch.minimum(L_ukr, args.margin_ukr)
-                L_mkr = torch.minimum(L_mkr, args.margin_mkr)
+                L_ukr = torch.minimum(L_ukr, margin_ukr)
+                L_mkr = torch.minimum(L_mkr, margin_mkr)
 
             loss = (alpha * L_ukr + beta * L_uu) + (theta * L_md + gamma * L_mkr)
 
@@ -393,15 +392,12 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optim
 
         avg_loss = epoch_metrics["Total"] / steps
         
-        # Evaluation: temporarily move model_re to GPU, avoid deepcopy
-        model_re.to(device)
-        model_re.eval()
+        # Evaluation: all models already on GPU (fp16 for frozen ones)
         model_ul.eval()
-        retain_dl_eval = DataLoader(dataset['retain'], sampler=SequentialSampler(dataset['retain']), batch_size=args.eval_batch_size)
+        eval_subset = torch.utils.data.Subset(dataset['retain'], list(range(min(200, len(dataset['retain'])))))
+        retain_dl_eval = DataLoader(eval_subset, sampler=SequentialSampler(eval_subset), batch_size=args.eval_batch_size)
         with torch.no_grad():
             cosine_sim = get_probability_measure(args, model_re, model_ul, retain_dl_eval, device)
-        model_re.cpu()
-        torch.cuda.empty_cache()
         
         wandb.log({f"epoch": epoch, "loss": avg_loss, "cosine_sim": cosine_sim, **{k: v/steps for k, v in epoch_metrics.items()}})
         print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | CosSim: {cosine_sim:.4f}")
@@ -477,11 +473,11 @@ def main():
 
     # 1. Load Original Model (With Auto-Discovery)
     base_path = ensure_model_path(config.base_model_path, "Base Model")
-    model_og = ImageTextModel.from_pretrained(base_path).to(device)
-    model_unlearn = copy.deepcopy(model_og)
+    model_og = ImageTextModel.from_pretrained(base_path).to(device).half()  # fp16 to save ~50% VRAM
+    model_unlearn = ImageTextModel.from_pretrained(base_path).to(device)    # fp32 for training precision
     
     re_path = ensure_model_path(config.retrained_model_path, "Retrained Model")
-    model_re = ImageTextModel.from_pretrained(re_path).to(device)
+    model_re = ImageTextModel.from_pretrained(re_path).to(device).half()    # fp16 to save ~50% VRAM
     
     # Tokenizer usually in the same dir as base model
     tokenizer = BertTokenizer.from_pretrained(base_path if os.path.exists(os.path.join(base_path, "vocab.txt")) else config.bert_pretrained_dir)
