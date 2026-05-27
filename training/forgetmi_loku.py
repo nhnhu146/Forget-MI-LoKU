@@ -304,8 +304,9 @@ def load_latest_checkpoint(output_dir, model_ul, gates, optimizer):
 def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optimizer, scheduler, dataset, alpha, beta, theta, gamma):
     start_epoch = load_latest_checkpoint(output_dir, model_ul, gates, optimizer) + 1
     
-    forget_dl = DataLoader(dataset['forget'], sampler=AlignedSampler(len(dataset['forget']), shuffle=True, seed=42), batch_size=args.unlearn_batch_size, num_workers=args.num_cpu_workers, pin_memory=True)
-    rand_dl = DataLoader(dataset['random'], sampler=AlignedSampler(len(dataset['random']), shuffle=True, seed=42), batch_size=args.unlearn_batch_size, num_workers=args.num_cpu_workers, pin_memory=True)
+    num_workers = min(getattr(args, 'num_cpu_workers', 2), 2)  # Colab recommended max is 2
+    forget_dl = DataLoader(dataset['forget'], sampler=AlignedSampler(len(dataset['forget']), shuffle=True, seed=42), batch_size=args.unlearn_batch_size, num_workers=num_workers, pin_memory=False)
+    rand_dl = DataLoader(dataset['random'], sampler=AlignedSampler(len(dataset['random']), shuffle=True, seed=42), batch_size=args.unlearn_batch_size, num_workers=num_workers, pin_memory=False)
     val_dl = DataLoader(dataset['validation'], sampler=SequentialSampler(dataset['validation']), batch_size=args.eval_batch_size)
 
     from evaluation.eval_unlearning import get_probability_measure
@@ -318,7 +319,7 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optim
         model_ul.train()
         for g in gates.values(): g.train()
         
-        retain_dl = DataLoader(dataset['retain'], sampler=RandomSampler(dataset['retain']), batch_size=args.unlearn_batch_size, num_workers=args.num_cpu_workers)
+        retain_dl = DataLoader(dataset['retain'], sampler=RandomSampler(dataset['retain']), batch_size=args.unlearn_batch_size, num_workers=num_workers)
         epoch_iterator = tqdm(zip(forget_dl, rand_dl, retain_dl), desc=f"Epoch {epoch}")
 
         epoch_metrics = {"MD": 0, "UU": 0, "MKR": 0, "UKR": 0, "Total": 0}
