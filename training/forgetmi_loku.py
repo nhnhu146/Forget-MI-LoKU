@@ -304,6 +304,15 @@ def load_latest_checkpoint(output_dir, model_ul, gates, optimizer):
 def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optimizer, scheduler, dataset, alpha, beta, theta, gamma):
     start_epoch = load_latest_checkpoint(output_dir, model_ul, gates, optimizer) + 1
     
+    # Memory optimization: move model_re to CPU (only needed for eval at end of epoch)
+    model_re.cpu()
+    torch.cuda.empty_cache()
+    
+    # Freeze model_og — no gradients needed
+    model_og.eval()
+    for p in model_og.parameters():
+        p.requires_grad = False
+
     num_workers = min(getattr(args, 'num_cpu_workers', 2), 2)  # Colab recommended max is 2
     forget_dl = DataLoader(dataset['forget'], sampler=AlignedSampler(len(dataset['forget']), shuffle=True, seed=42), batch_size=args.unlearn_batch_size, num_workers=num_workers, pin_memory=False)
     rand_dl = DataLoader(dataset['random'], sampler=AlignedSampler(len(dataset['random']), shuffle=True, seed=42), batch_size=args.unlearn_batch_size, num_workers=num_workers, pin_memory=False)
@@ -331,19 +340,19 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optim
             f_in, _, _ = get_model_inputs(args, f_batch, device)
             rnd_in, _, _ = get_model_inputs(args, r_batch, device)
 
-            # 2. Model Outputs
-            og_ret_img_emb, _, og_ret_txt_emb, _ = model_og(**ret_in)[:4]
+            # 2. Model Outputs — model_og is frozen, use no_grad to save memory
+            with torch.no_grad():
+                og_ret_img_emb, _, og_ret_txt_emb, _ = model_og(**ret_in)[:4]
+                og_rnd_img_emb, _, og_rnd_txt_emb, _ = model_og(**rnd_in)[:4]
+            
             ul_ret_img_emb, _, ul_ret_txt_emb, _ = model_ul(**ret_in)[:4]
-            
-            og_rnd_img_emb, _, og_rnd_txt_emb, _ = model_og(**rnd_in)[:4]
-            
             ul_frg_img_emb, _, ul_frg_txt_emb, _ = model_ul(**f_in)[:4]
 
             # 3. Fusion
             ul_ret_joint = gates['ul_ret'](ul_ret_img_emb, ul_ret_txt_emb)
             ul_frg_joint = gates['ul_frg'](ul_frg_img_emb, ul_frg_txt_emb)
-            og_rnd_joint = gates['og_rnd'](og_rnd_img_emb, og_rnd_txt_emb)
-            og_ret_joint = gates['og_ret'](og_ret_img_emb, og_ret_txt_emb)
+            og_rnd_joint = gates['og_rnd'](og_rnd_img_emb.detach(), og_rnd_txt_emb.detach())
+            og_ret_joint = gates['og_ret'](og_ret_img_emb.detach(), og_ret_txt_emb.detach())
 
             # 4. Losses (Using Forget-MI Baseline Logic)
             ul_frg_concat = torch.cat((ul_frg_img_emb, ul_frg_txt_emb), dim=-1)
@@ -383,7 +392,16 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, gates, optim
             steps += 1
 
         avg_loss = epoch_metrics["Total"] / steps
-        cosine_sim = get_probability_measure(args, copy.deepcopy(model_re).eval(), copy.deepcopy(model_ul).eval(), retain_dl, device)
+        
+        # Evaluation: temporarily move model_re to GPU, avoid deepcopy
+        model_re.to(device)
+        model_re.eval()
+        model_ul.eval()
+        retain_dl_eval = DataLoader(dataset['retain'], sampler=SequentialSampler(dataset['retain']), batch_size=args.eval_batch_size)
+        with torch.no_grad():
+            cosine_sim = get_probability_measure(args, model_re, model_ul, retain_dl_eval, device)
+        model_re.cpu()
+        torch.cuda.empty_cache()
         
         wandb.log({f"epoch": epoch, "loss": avg_loss, "cosine_sim": cosine_sim, **{k: v/steps for k, v in epoch_metrics.items()}})
         print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | CosSim: {cosine_sim:.4f}")
