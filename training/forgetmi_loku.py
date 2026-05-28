@@ -35,7 +35,7 @@ import wandb
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, Sampler, RandomSampler, SequentialSampler, Subset
+from torch.utils.data import DataLoader, Sampler, RandomSampler, Subset
 from transformers import BertTokenizer
 from peft import LoraConfig, get_peft_model
 
@@ -91,6 +91,27 @@ def count_params(model):
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
     return trainable, total
+
+
+def _model_dtype(model):
+    for p in model.parameters():
+        if p.is_floating_point():
+            return p.dtype
+    return torch.float32
+
+
+def safe_forward(model, inputs):
+    """
+    Forward pass that auto-casts floating inputs to match model dtype.
+    Fixes 'Input type FloatTensor and weight type HalfTensor' errors when
+    calling fp16 frozen models outside autocast.
+    """
+    dtype = _model_dtype(model)
+    casted = {
+        k: (v.to(dtype) if torch.is_tensor(v) and v.is_floating_point() and v.dtype != dtype else v)
+        for k, v in inputs.items()
+    }
+    return model(**casted)
 
 
 # ============================================================================
@@ -346,7 +367,7 @@ def per_sample_ce(model, dataset, device, args, batch_size=32):
     for batch in loader:
         batch = tuple(t.to(device, non_blocking=True) if torch.is_tensor(t) else t for t in batch)
         inputs, labels, _ = get_model_inputs(args, batch, device)
-        outputs = model(**inputs)
+        outputs = safe_forward(model, inputs)
         logits = outputs[1].float()
         losses = F.cross_entropy(logits, labels.long().view(-1), reduction='none')
         out.append(losses.cpu().numpy())
@@ -373,15 +394,16 @@ def run_mia(model, retain_ds, test_ds, forget_ds, device, args, batch_size=32, s
 
 @torch.no_grad()
 def cosine_sim_models(model_a, model_b, dataset, device, args, batch_size=32):
-    """Mean cosine similarity of img_logits between two models on a dataset."""
+    """Mean cosine similarity of img_logits between two models on a dataset.
+    Handles fp16/fp32 dtype mismatch via safe_forward."""
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     sims = []
     model_a.eval(); model_b.eval()
     for batch in loader:
         batch = tuple(t.to(device, non_blocking=True) if torch.is_tensor(t) else t for t in batch)
         inputs, _, _ = get_model_inputs(args, batch, device)
-        la = model_a(**inputs)[1].float()
-        lb = model_b(**inputs)[1].float()
+        la = safe_forward(model_a, inputs)[1].float()
+        lb = safe_forward(model_b, inputs)[1].float()
         sims.append(F.cosine_similarity(la, lb, dim=1).cpu().numpy())
     return float(np.concatenate(sims).mean())
 
@@ -398,8 +420,8 @@ def perf_metrics(model, dataset, device, args, batch_size=32):
     for batch in loader:
         batch = tuple(t.to(device, non_blocking=True) if torch.is_tensor(t) else t for t in batch)
         inputs, labels, _ = get_model_inputs(args, batch, device)
-        outputs = model(**inputs)
-        all_logits.append(outputs[1].cpu().numpy())
+        outputs = safe_forward(model, inputs)
+        all_logits.append(outputs[1].float().cpu().numpy())
         all_labels.append(labels.cpu().numpy())
     logits = np.concatenate(all_logits, axis=0)
     labels = np.concatenate(all_labels, axis=0)
@@ -446,8 +468,6 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
     grad_clip = float(getattr(args, 'grad_clip', 1.0))
     eval_subset = Subset(datasets['retain'],
                          list(range(min(200, len(datasets['retain'])))))
-    eval_dl_retain = DataLoader(eval_subset, batch_size=args.eval_batch_size,
-                                sampler=SequentialSampler(eval_subset))
 
     best_cossim = -1.0; patience = 0
     margin_ukr = margin_mkr = None
@@ -713,26 +733,49 @@ def main():
     print("📈 FINAL EVALUATION")
     print("=" * 60)
 
+    # Free training-only memory before eval (model_og + optimizer + gates not needed)
+    del model_og, optimizer, gates
+    torch.cuda.empty_cache()
+
     # Merge LoRA back into base for clean evaluation
     print("🔀 Merging LoRA adapters into base model...")
     merged = model_unlearn.merge_and_unload()
     merged.eval()
+    for p in merged.parameters():
+        p.requires_grad = False
+    torch.cuda.empty_cache()
 
-    print("🛡️  Computing MIA score...")
-    mia = run_mia(merged, datasets['retain'], datasets['test'], datasets['forget'],
-                  device, config, batch_size=config.eval_batch_size,
-                  seed=int(config.random_seed))
+    # Wrap MIA + perf eval in try/except so a single failure doesn't lose everything
+    try:
+        print("🛡️  Computing MIA score...")
+        mia = run_mia(merged, datasets['retain'], datasets['test'], datasets['forget'],
+                      device, config, batch_size=config.eval_batch_size,
+                      seed=int(config.random_seed))
+    except Exception as e:
+        print(f"⚠️  MIA failed: {e}"); mia = float('nan')
 
-    print("📐 Computing CosSim vs retrained model...")
-    cossim_re = cosine_sim_models(merged, model_re, datasets['retain'], device,
-                                  config, batch_size=config.eval_batch_size)
+    try:
+        print("📐 Computing CosSim vs retrained model...")
+        cossim_re = cosine_sim_models(merged, model_re, datasets['retain'], device,
+                                      config, batch_size=config.eval_batch_size)
+    except Exception as e:
+        print(f"⚠️  CosSim failed: {e}"); cossim_re = float('nan')
 
-    print("📊 Performance on test set...")
-    test_m = perf_metrics(merged, datasets['test'], device, config,
-                          batch_size=config.eval_batch_size)
-    print("📊 Performance on forget set...")
-    forget_m = perf_metrics(merged, datasets['forget'], device, config,
-                            batch_size=config.eval_batch_size)
+    try:
+        print("📊 Performance on test set...")
+        test_m = perf_metrics(merged, datasets['test'], device, config,
+                              batch_size=config.eval_batch_size)
+    except Exception as e:
+        print(f"⚠️  Test perf failed: {e}")
+        test_m = {'AUC': float('nan'), 'Macro_F1': float('nan'), 'F1': float('nan')}
+
+    try:
+        print("📊 Performance on forget set...")
+        forget_m = perf_metrics(merged, datasets['forget'], device, config,
+                                batch_size=config.eval_batch_size)
+    except Exception as e:
+        print(f"⚠️  Forget perf failed: {e}")
+        forget_m = {'AUC': float('nan'), 'Macro_F1': float('nan'), 'F1': float('nan')}
 
     gpu_peak = (torch.cuda.max_memory_allocated() / 1e9
                 if torch.cuda.is_available() else 0.0)
