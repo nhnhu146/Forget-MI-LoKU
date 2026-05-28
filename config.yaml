@@ -1,120 +1,156 @@
 program: training/forgetmi_loku.py
 method: random
 parameters:
+  # ===== WandB =====
   project:
-    value: "forget_exp"
+    value: "forget_mi_loku"
   entity:
     value: "unlearning"
-  use_noise:
-    value: false
-  do_train:
-    value: true
-  overwrite_output_dir:
-    value: true
-  do_eval:
-    value: false
+
+  # ===== Data paths =====
   base_model_path:
     value: "./forgetme/training_original_model"
-  random_point_ratio:
-    value: 0.1
-  validation_ratio:
-    value: 0.1
   retrained_model_path:
     value: "./model_retrained_3per/"
-  output_dir:
-    value: "./unlearning_output/"
   bert_pretrained_dir:
     value: "./forgetme/training_original_model/"
   text_data_dir:
     value: "./data/metadata"
-  data_split_path:
-    value: "./data_splits/mimic-cxr-sub-img-edema-split-manualtest.csv"
   img_data_dir:
     value: "./data/img_data"
+  data_split_path:
+    value: "./data_splits/mimic-cxr-sub-img-edema-split-manualtest.csv"
   synonyms_dir:
     value: "./data_splits/Synonyms.csv"
   forget_set_path:
-    value: "./data_splits/forget_set_3per.csv"
+    value: "./data_splits/forget_set_3per.csv"          # 3% — start here for fast sanity
+  output_dir:
+    value: "./unlearning_output/"
+
+  # ===== Dataset prep =====
   max_seq_length:
     value: 320
   text_noise_level:
-    value: 0.5  
+    value: 0.5
+  output_channel_encoding:
+    value: "multiclass"
+  reprocess_input_data:
+    value: false
+  validation_ratio:
+    value: 0.1
+  random_point_ratio:
+    value: 0.1
   random_seed:
     value: 42
-  output_channel_encoding:
-    value: "multiclass"  
+  id:
+    value: "loku_3per"
+
+  # ===== Training =====
+  do_train:
+    value: true
+  do_eval:
+    value: false
+  overwrite_output_dir:
+    value: true
+  use_noise:
+    value: false                                          # false → use bounded forget-push
   learning_rate:
-    values: [1e-4, 1e-5]
+    value: 5.0e-4                                         # LoRA tolerates higher lr than full FT
   weight_decay:
     value: 0.01
   unlearn_epochs:
-    value: 30
-  scheduler:
-    value: "ReduceLROnPlateau"
+    value: 8                                              # LoRA usually converges <10 epochs
+  early_stop_patience:
+    value: 3
+  grad_clip:
+    value: 1.0
   warmup_proportion:
     value: 0.1
-  eval_batch_size:
-    value: 16
+  scheduler:
+    value: "ReduceLROnPlateau"
   unlearn_batch_size:
     value: 16
+  eval_batch_size:
+    value: 16
+  num_cpu_workers:
+    value: 2
+
+  # ===== Noise (only used if use_noise=true) =====
   noise_mean:
     value: 0
   noise_std:
     value: 0.1
+
+  # ===== Loss weights (UR=alpha, UU=beta, MD=theta, MR=gamma, RE-anchor=eta) =====
+  # "Unimodal" setting (best for 3% in paper)
   alpha:
-    value: 1
+    value: 1.0
   beta:
-    value: 1  
+    value: 1.0
   theta:
-    value: 2 
+    value: 0.5
   gamma:
-    value: 2 
+    value: 0.5
+  eta_re_anchor:
+    value: 0.5                                            # set 0.0 to disable re-anchor
+
+  # ===== Forget-margin (bounded loss) =====
+  forget_margin:
+    value: 8.0                                            # push forget embeddings until distance ≥ this
+
+  # ===== LoRA =====
   lora_r:
     value: 8
   lora_alpha:
     value: 16
   lora_dropout:
     value: 0.05
+  lora_target_modules:
+    value: ["query", "key", "value"]                      # BERT attention only — avoids img_model.fc1
+
+  # ===== Fisher Information =====
+  fisher_max_samples:
+    value: 256
+  fisher_batch_size:
+    value: 16
+  loku_init_scale:
+    value: 0.05                                           # small → base behavior preserved at init
+
+  # ===== Model architecture flags =====
+  bert_pool_last_hidden:
+    value: false
+  bert_pool_use_img:
+    value: false
+  bert_pool_img_lowerlevel:
+    value: false
+
+  # ===== Misc (kept for compatibility with shared modules) =====
+  use_text_data_dir:
+    value: false
+  use_data_split_path:
+    value: false
+  training_mode:
+    value: "supervised"
+  semisupervised_training_data:
+    value: "allCXR"
+  use_masked_txt:
+    value: false
+  use_all_data:
+    value: false
+  use_pretrained_checkpoint:
+    value: false
+  print_predictions:
+    value: false
+  print_embeddings:
+    value: false
+  logging_steps:
+    value: 50
+  save_epochs:
+    value: 1
   ihl_margin:
     value: 0.5
-  bert_pool_last_hidden: 
-    value: false 
-  bert_pool_use_img: 
-    value: false 
-  bert_pool_img_lowerlevel: 
-    value: false 
-  reprocess_input_data:
-    value: false
-  id: 
-    value: "example"
-  use_text_data_dir: 
-    value: false
-  use_data_split_path: 
-    value: false 
-  training_mode: 
-    value: "supervised"
-  semisupervised_training_data: 
-    value: "allCXR"
-  use_masked_txt: 
-    value: false
-  use_all_data: 
-    value: false
-  use_all_data: 
-    value: false
-  use_pretrained_checkpoint: 
-    value: false
-  print_predictions: 
-    value: false
-  print_embeddings: 
-    value: false
-  num_cpu_workers: 
-    value: 8
-  logging_steps: 
-    value: 50 
-  save_epochs: 
-    value: 1 
+
 command:
   - ${env:PYTHON}
   - training/forgetmi_loku.py
   - --config=config.yaml
-
