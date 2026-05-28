@@ -409,37 +409,51 @@ def cosine_sim_models(model_a, model_b, dataset, device, args, batch_size=32):
 
 
 @torch.no_grad()
-def perf_metrics(model, dataset, device, args, batch_size=32):
-    """Compute AUC + Macro-F1 + Accuracy on a dataset."""
+def perf_metrics(model, dataset, device, args, batch_size=32, num_classes=4):
+    """Compute AUC + Macro-F1 + Accuracy on a dataset.
+    Uses label_onehot from batch (compute_auc/get_acc_f1 expect [N, num_classes])."""
     from joint_img_txt.metrics import compute_auc, get_acc_f1
     from scipy.special import softmax
     from scipy.stats import logistic
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    all_logits, all_labels = [], []
+    all_logits, all_labels_oh = [], []
     model.eval()
     for batch in loader:
         batch = tuple(t.to(device, non_blocking=True) if torch.is_tensor(t) else t for t in batch)
-        inputs, labels, _ = get_model_inputs(args, batch, device)
+        inputs, label_raw, _ = get_model_inputs(args, batch, device)
+        # batch structure: image[0], label_raw[1], txt_ids[2], txt_mask[3], txt_seg[4], label_onehot[5], report_id[6]
+        label_oh = batch[5]
         outputs = safe_forward(model, inputs)
         all_logits.append(outputs[1].float().cpu().numpy())
-        all_labels.append(labels.cpu().numpy())
+        # Ensure one-hot [N, num_classes]
+        oh_np = label_oh.cpu().numpy()
+        if oh_np.ndim == 1 or oh_np.shape[-1] == 1:
+            # label_raw fallback: convert raw class index to one-hot
+            raw = oh_np.flatten().astype(int)
+            oh_np = np.eye(num_classes)[np.clip(raw, 0, num_classes - 1)]
+        all_labels_oh.append(oh_np.astype(int))
     logits = np.concatenate(all_logits, axis=0)
-    labels = np.concatenate(all_labels, axis=0)
+    labels_oh = np.concatenate(all_labels_oh, axis=0)
     if args.output_channel_encoding == 'multilabel':
         probs = logistic.cdf(logits)
     else:
         probs = softmax(logits, axis=1)
     try:
-        auc, _ = compute_auc(labels, probs, output_channel_encoding=args.output_channel_encoding)
-        auc_mean = float(np.mean(auc))
-    except Exception:
-        auc_mean = float('nan')
+        auc, _ = compute_auc(labels_oh.tolist(), probs.tolist(),
+                             output_channel_encoding=args.output_channel_encoding)
+        # filter out NaN per-class AUCs
+        valid = [a for a in auc if not (isinstance(a, float) and np.isnan(a))]
+        auc_mean = float(np.mean(valid)) if valid else float('nan')
+    except Exception as e:
+        print(f"   [auc warn] {e}"); auc_mean = float('nan')
     try:
-        f1m, _, _ = get_acc_f1(labels, probs, args.output_channel_encoding)
-        macro_f1 = float(f1m['macro_f1']); f1 = float(np.mean(f1m['f1']))
-    except Exception:
-        macro_f1, f1 = float('nan'), float('nan')
-    return {'AUC': auc_mean, 'Macro_F1': macro_f1, 'F1': f1}
+        f1m, _, _ = get_acc_f1(labels_oh, probs, args.output_channel_encoding)
+        macro_f1 = float(f1m['macro_f1']); f1 = float(f1m['f1'])
+        accuracy = float(f1m['accuracy'])
+    except Exception as e:
+        print(f"   [f1 warn] {e}")
+        macro_f1, f1, accuracy = float('nan'), float('nan'), float('nan')
+    return {'AUC': auc_mean, 'Macro_F1': macro_f1, 'F1': f1, 'Accuracy': accuracy}
 
 
 # ============================================================================
