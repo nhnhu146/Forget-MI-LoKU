@@ -480,6 +480,10 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
     forget_margin = float(getattr(args, 'forget_margin', 8.0))
     use_re_anchor = eta > 0
     grad_clip = float(getattr(args, 'grad_clip', 1.0))
+    # Classification loss weights (NegGrad-style — provides gradient signal to img/txt classifiers)
+    kappa_ret = float(getattr(args, 'kappa_cls_retain', 1.0))   # keep retain classification correct
+    kappa_frg = float(getattr(args, 'kappa_cls_forget', 0.5))   # push forget classification wrong
+    cls_clamp = float(getattr(args, 'cls_forget_clamp', 5.0))   # cap forget CE to avoid divergence
     eval_subset = Subset(datasets['retain'],
                          list(range(min(200, len(datasets['retain'])))))
 
@@ -496,12 +500,13 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
                                batch_size=args.unlearn_batch_size,
                                num_workers=nw)
         epoch_iter = tqdm(zip(forget_dl, rand_dl, retain_dl), desc=f"Epoch {epoch}")
-        agg = {'UU': 0, 'MD': 0, 'UKR': 0, 'MKR': 0, 'RE_anchor': 0, 'Total': 0}
+        agg = {'UU': 0, 'MD': 0, 'UKR': 0, 'MKR': 0, 'RE_anchor': 0,
+               'CLS_ret': 0, 'CLS_frg': 0, 'Total': 0}
         steps = 0
 
         for fb, rb, retb in epoch_iter:
-            ret_in, _, _ = get_model_inputs(args, retb, device)
-            f_in, _, _ = get_model_inputs(args, fb, device)
+            ret_in, ret_lbl, _ = get_model_inputs(args, retb, device)
+            f_in, f_lbl, _ = get_model_inputs(args, fb, device)
             rnd_in, _, _ = get_model_inputs(args, rb, device)
 
             # Frozen forward passes (fp16 via autocast)
@@ -515,9 +520,9 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
             if use_re_anchor:
                 re_ret_i = re_ret_i.float(); re_ret_t = re_ret_t.float()
 
-            # Unlearning model forward (trainable)
-            ul_ret_i, _, ul_ret_t, _ = model_ul(**ret_in)[:4]
-            ul_frg_i, _, ul_frg_t, _ = model_ul(**f_in)[:4]
+            # Unlearning model forward (trainable) — also capture logits for classification loss
+            ul_ret_i, ul_ret_il, ul_ret_t, ul_ret_tl = model_ul(**ret_in)[:4]
+            ul_frg_i, ul_frg_il, ul_frg_t, ul_frg_tl = model_ul(**f_in)[:4]
 
             # Joint embeddings
             ul_ret_j = gates['ul_ret'](ul_ret_i, ul_ret_t)
@@ -556,9 +561,19 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
                 re_ret_c = torch.cat((re_ret_i, re_ret_t), dim=-1)
                 L_re = euclidean_distance(ul_ret_c, re_ret_c).mean()
 
+            # ----- Classification losses (provides gradient signal to img/txt classifier heads) -----
+            # Retain: keep classification correct (standard CE)
+            # Forget: push classification wrong (negative CE, clamped to avoid divergence)
+            ret_y = ret_lbl.long().view(-1)
+            f_y = f_lbl.long().view(-1)
+            L_cls_ret = 0.5 * (F.cross_entropy(ul_ret_il, ret_y) + F.cross_entropy(ul_ret_tl, ret_y))
+            L_cls_frg_raw = 0.5 * (F.cross_entropy(ul_frg_il, f_y) + F.cross_entropy(ul_frg_tl, f_y))
+            L_cls_frg = -torch.clamp(L_cls_frg_raw, max=cls_clamp)  # gradient ascent, capped
+
             loss = (alpha * L_ukr + beta * L_uu
                     + theta * L_md + gamma * L_mkr
-                    + eta * L_re)
+                    + eta * L_re
+                    + kappa_ret * L_cls_ret + kappa_frg * L_cls_frg)
 
             optimizer.zero_grad()
             loss.backward()
@@ -572,6 +587,8 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
             agg['UU'] += L_uu.item(); agg['MD'] += L_md.item()
             agg['UKR'] += L_ukr.item(); agg['MKR'] += L_mkr.item()
             agg['RE_anchor'] += L_re.item()
+            agg['CLS_ret'] += L_cls_ret.item()
+            agg['CLS_frg'] += L_cls_frg.item()
             agg['Total'] += loss.item()
             steps += 1
 
@@ -585,7 +602,8 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
         wandb.log(log)
         epoch_line = (f"[E{epoch:02d}] loss={avg['Total']:+.3f}  UU={avg['UU']:+.3f}  "
                       f"MD={avg['MD']:+.3f}  UKR={avg['UKR']:+.3f}  MKR={avg['MKR']:+.3f}  "
-                      f"RE={avg['RE_anchor']:+.3f}  | CosSim(ul,re)={cossim:.4f}")
+                      f"RE={avg['RE_anchor']:+.3f}  CLS_ret={avg['CLS_ret']:+.3f}  "
+                      f"CLS_frg={avg['CLS_frg']:+.3f}  | CosSim(ul,re)={cossim:.4f}")
         print(epoch_line)
         if tracker is not None:
             tracker.log_epoch_line(epoch_line)
@@ -725,6 +743,23 @@ def main():
         r=int(config.lora_r),
         init_scale=float(getattr(config, 'loku_init_scale', 0.05)),
     )
+
+    # ----- Unfreeze classifier heads -----
+    # Important: LoRA only touches BERT attention, but eval uses outputs[1] = img_logits
+    # which comes from img_model.fc1. Without unfreezing, the image classifier never
+    # changes during training and eval is invariant to all hyperparameters.
+    if getattr(config, 'unfreeze_classifier_heads', True):
+        try:
+            n_before = sum(p.numel() for p in model_unlearn.parameters() if p.requires_grad)
+            for p in model_unlearn.img_model.fc1.parameters():
+                p.requires_grad = True
+            for p in model_unlearn.text_model.classifier.parameters():
+                p.requires_grad = True
+            n_after = sum(p.numel() for p in model_unlearn.parameters() if p.requires_grad)
+            print(f"🔓 Unfroze classifier heads: +{n_after - n_before:,} trainable params")
+        except AttributeError as e:
+            print(f"⚠️  Could not unfreeze classifier heads: {e}")
+
     trainable, total = count_params(model_unlearn)
     print(f"📊 Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)")
 
