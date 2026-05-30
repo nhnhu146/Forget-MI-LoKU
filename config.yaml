@@ -59,9 +59,9 @@ parameters:
   weight_decay:
     value: 0.01
   unlearn_epochs:
-    value: 15                                             # [EXP 004] was 8 (NegGrad cần nhiều epoch hơn)
+    value: 10                                             # [EXP 005] was 15 (vừa đủ, tránh over-train)
   early_stop_patience:
-    value: 6                                              # [EXP 004] was 3 (đỡ stop quá sớm)
+    value: 3                                              # [EXP 005] was 6 (stop sớm khi CosSim giảm)
   grad_clip:
     value: 1.0
   warmup_proportion:
@@ -83,28 +83,30 @@ parameters:
 
   # ===== Loss weights (UR=alpha, UU=beta, MD=theta, MR=gamma, RE-anchor=eta) =====
   # "Unimodal" setting (best for 3% in paper)
-  # [EXP 004] Giảm mạnh embedding losses (UU=15+ trước đây đè bẹp CLS_frg)
+  # [EXP 005] Calibrated unlearning: BỎ HẲN UU/MD (gây hại trong Exp 04),
+  # tăng retention strong, giảm NegGrad về moderate (mục tiêu: forget CE ≈ test CE)
   alpha:
-    value: 0.3                                            # was 1.0 (UKR — giảm)
+    value: 1.0                                            # [EXP 005] UKR mạnh để giữ retain embedding
   beta:
-    value: 0.1                                            # was 1.0 (UU — giảm mạnh, hết đè bẹp)
+    value: 0.0                                            # [EXP 005] BỎ HẲN UU (xáo trộn BERT không cần thiết)
   theta:
-    value: 0.0                                            # was 0.5 (MD = 0 luôn, bỏ luôn)
+    value: 0.0                                            # MD = 0, bỏ
   gamma:
-    value: 0.5                                            # was 0.5 (MKR giữ nguyên)
+    value: 1.0                                            # [EXP 005] MKR mạnh để giữ joint retain
   eta_re_anchor:
-    value: 0.0                                            # [EXP 002] tắt re-anchor
+    value: 0.0                                            # tắt re-anchor
 
-  # ===== Classification losses (KEY của Exp 04) =====
-  # Tăng kappa_cls_forget gấp 6 lần để NegGrad thật sự chiếm lĩnh gradient
+  # ===== Classification losses (calibrated) =====
+  # Exp 04: kappa_frg=3.0 quá mạnh → CE forget bay lên 5.7 → MIA tăng vọt
+  # Exp 05: kappa_frg=1.0 moderate → đẩy forget CE đến ~2-3 (gần test) → MIA giảm
   kappa_cls_retain:
-    value: 2.0                                            # [EXP 004] was 1.0 (anchor retain mạnh hơn)
+    value: 3.0                                            # [EXP 005] was 2.0 (anchor mạnh hơn)
   kappa_cls_forget:
-    value: 3.0                                            # [EXP 004] was 0.5 (gradient ascent mạnh gấp 6!)
+    value: 1.0                                            # [EXP 005] was 3.0 (giảm mạnh — tránh over-unlearn)
   cls_forget_clamp:
-    value: 10.0                                           # [EXP 004] was 5.0 (cho CE forget lên cao hơn)
+    value: 4.0                                            # [EXP 005] was 10 (cap thấp hơn → tránh đẩy quá)
   unfreeze_classifier_heads:
-    value: true                                           # unfreeze img_model.fc1 + text_model.classifier
+    value: true
 
   # ===== Forget-margin (bounded loss) =====
   forget_margin:
