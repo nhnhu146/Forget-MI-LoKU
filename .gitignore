@@ -1,8 +1,11 @@
 data/
 model_retrained_3per/
 unlearning_output/
+forgetme/training_original_model/
 efficient-llm-unlearning-main/efficient-llm-unlearning-main/
 *.zip
 *.bin
-*.pycache/
+__pycache__/
+*.pyc
 .DS_Store
+.ipynb_checkpoints/

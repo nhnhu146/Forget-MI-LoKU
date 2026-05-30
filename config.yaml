@@ -92,11 +92,11 @@ parameters:
   gamma:
     value: 0.5
   eta_re_anchor:
-    value: 0.5                                            # set 0.0 to disable re-anchor
+    value: 0.0                                            # [EXP 002] tắt re-anchor (was 0.5)
 
   # ===== Forget-margin (bounded loss) =====
   forget_margin:
-    value: 8.0                                            # push forget embeddings until distance ≥ this
+    value: 20.0                                           # [EXP 002] tăng margin (was 8.0) — kích hoạt L_MD
 
   # ===== LoRA =====
   lora_r:

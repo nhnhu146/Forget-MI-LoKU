@@ -461,7 +461,7 @@ def perf_metrics(model, dataset, device, args, batch_size=32, num_classes=4):
 # ============================================================================
 
 def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimizer,
-            datasets, weights):
+            datasets, weights, tracker=None):
     alpha, beta, theta, gamma, eta = weights  # last is re-anchor weight
     start_epoch = load_ckpt(out_dir, model_ul, gates, optimizer) + 1
 
@@ -583,9 +583,12 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
         log = {'epoch': epoch, 'cossim_vs_re': cossim,
                **{f'loss/{k}': v for k, v in avg.items()}}
         wandb.log(log)
-        print(f"[E{epoch:02d}] loss={avg['Total']:+.3f}  UU={avg['UU']:+.3f}  "
-              f"MD={avg['MD']:+.3f}  UKR={avg['UKR']:+.3f}  MKR={avg['MKR']:+.3f}  "
-              f"RE={avg['RE_anchor']:+.3f}  | CosSim(ul,re)={cossim:.4f}")
+        epoch_line = (f"[E{epoch:02d}] loss={avg['Total']:+.3f}  UU={avg['UU']:+.3f}  "
+                      f"MD={avg['MD']:+.3f}  UKR={avg['UKR']:+.3f}  MKR={avg['MKR']:+.3f}  "
+                      f"RE={avg['RE_anchor']:+.3f}  | CosSim(ul,re)={cossim:.4f}")
+        print(epoch_line)
+        if tracker is not None:
+            tracker.log_epoch_line(epoch_line)
         save_ckpt(out_dir, epoch, model_ul, gates, optimizer, avg)
 
         # Early stopping on CosSim (higher = better)
@@ -629,7 +632,21 @@ def main():
     ap.add_argument("--config", type=str, default="config.yaml")
     ap.add_argument("--fresh", action="store_true",
                     help="Delete prior checkpoints before training")
+    ap.add_argument("--exp", type=str, default=None,
+                    help="Experiment short name → auto-track to experiments/exp_NNN_<name>.md")
+    ap.add_argument("--hypothesis", type=str, default=None,
+                    help="One-line hypothesis for the experiment (auto-fill section 1)")
     cli = ap.parse_args()
+
+    # ----- Optional experiment tracker -----
+    tracker = None
+    if cli.exp:
+        try:
+            from scripts.exp_tracker import ExpTracker
+            tracker = ExpTracker(name=cli.exp, hypothesis=cli.hypothesis)
+        except Exception as e:
+            print(f"⚠️  ExpTracker init failed ({e}); continuing without tracking")
+            tracker = None
 
     with open(cli.config, 'r') as f:
         raw = yaml.safe_load(f)
@@ -738,7 +755,8 @@ def main():
     elapsed_h = unlearn(config, out_dir, device,
                        model_og, model_unlearn, model_re,
                        gates, optimizer, datasets,
-                       weights=(alpha, beta, theta, gamma, eta))
+                       weights=(alpha, beta, theta, gamma, eta),
+                       tracker=tracker)
 
     # ============================================================
     # FINAL EVALUATION
@@ -841,6 +859,25 @@ def main():
             w.writeheader()
         w.writerow(row)
     print(f"\n💾 Saved row to {csv_path}")
+
+    # ----- Auto-fill experiment MD file + INDEX (if --exp was passed) -----
+    if tracker is not None:
+        tracker_results = {
+            'MIA':            float(mia) if mia == mia else float('nan'),
+            'Df_AUC':         float(forget_m['AUC']),
+            'Df_F1':          float(forget_m['Macro_F1']),
+            'Dt_AUC':         float(test_m['AUC']),
+            'Dt_F1':          float(test_m['Macro_F1']),
+            'dist_vs_re':     float(1 - cossim_re) if cossim_re == cossim_re else float('nan'),
+            'time_h':         float(elapsed_h),
+            'gpu_gb':         float(gpu_peak),
+            'trainable_pct':  100.0 * trainable / total,
+        }
+        try:
+            tracker.finalize(tracker_results, elapsed_h)
+        except Exception as e:
+            print(f"⚠️  Tracker.finalize failed: {e}")
+
     wandb.finish()
 
 
