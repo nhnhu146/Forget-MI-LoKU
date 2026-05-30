@@ -19,6 +19,7 @@ Sắp xếp theo thứ tự thời gian (mới nhất ở dưới). Auto-tracker
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 001 | loku_v1_baseline | 2025-05-30 | ✅ | 0.552 | 0.829 | 0.597 | 0.674 | 0.387 | 0.094 | 0.389% | Speed/utility tốt hơn paper; forget yếu hơn |
 | 002 | forget_margin_20_no_anchor | 2026-05-30 | 🔄 | 0.552 | 0.829 | 0.597 | 0.674 | 0.387 | 0.092 | 0.389% | _(auto, cần kết luận)_ |
+| 003 | exp03_classifier_unfrozen_neggrad | 2026-05-30 | 🔄 | 0.557 | 0.830 | 0.597 | 0.669 | 0.386 | 0.094 | 0.395% | _(auto, cần kết luận)_ |
 
 **Reference (paper Forget-MI, 3%)**: MIA=0.571 | Df_AUC=0.735 | Df_F1=0.393 | Dt_AUC=0.625 | Dt_F1=0.250 | Time=5h | Trainable=100%
 
