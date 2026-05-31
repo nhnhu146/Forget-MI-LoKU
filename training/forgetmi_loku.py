@@ -171,8 +171,9 @@ def build_dataset(args, tokenizer):
                                 f"cachednoisyfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}")
 
     if os.path.exists(cached) and os.path.exists(cached_noisy) and not args.reprocess_input_data:
-        features = torch.load(cached)
-        noisy_features = torch.load(cached_noisy)
+        # weights_only=False needed for PyTorch 2.6+ (cached files contain custom InputFeatures class)
+        features = torch.load(cached, weights_only=False)
+        noisy_features = torch.load(cached_noisy, weights_only=False)
     else:
         synonyms = pd.read_csv(args.synonyms_dir)
         examples = processor.get_all_examples(args.text_data_dir)
@@ -341,7 +342,7 @@ def load_ckpt(out_dir, model, gates, optimizer):
     if not os.path.exists(p):
         return -1
     try:
-        cp = torch.load(p, map_location='cpu')
+        cp = torch.load(p, map_location='cpu', weights_only=False)
         model.load_state_dict(cp['lora_state'], strict=False)
         for n, g in gates.items():
             if n in cp['gates']:
@@ -480,10 +481,13 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
     forget_margin = float(getattr(args, 'forget_margin', 8.0))
     use_re_anchor = eta > 0
     grad_clip = float(getattr(args, 'grad_clip', 1.0))
-    # Classification loss weights (NegGrad-style — provides gradient signal to img/txt classifiers)
+    # Classification loss weights
     kappa_ret = float(getattr(args, 'kappa_cls_retain', 1.0))   # keep retain classification correct
-    kappa_frg = float(getattr(args, 'kappa_cls_forget', 0.5))   # push forget classification wrong
+    kappa_frg = float(getattr(args, 'kappa_cls_forget', 0.5))   # NegGrad weight (legacy)
     cls_clamp = float(getattr(args, 'cls_forget_clamp', 5.0))   # cap forget CE to avoid divergence
+    # Uniform-prior unlearning (NEW): push forget predictions toward uniform distribution
+    # Better than NegGrad: Forget F1 ↓ (random predictions) + MIA ↓ (forget loss ≈ test loss)
+    uniform_weight = float(getattr(args, 'uniform_prior_weight', 0.0))   # 0 = disabled (legacy NegGrad)
     eval_subset = Subset(datasets['retain'],
                          list(range(min(200, len(datasets['retain'])))))
 
@@ -562,18 +566,35 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
                 L_re = euclidean_distance(ul_ret_c, re_ret_c).mean()
 
             # ----- Classification losses (provides gradient signal to img/txt classifier heads) -----
-            # Retain: keep classification correct (standard CE)
-            # Forget: push classification wrong (negative CE, clamped to avoid divergence)
+            # Retain: standard CE (keep classification correct)
             ret_y = ret_lbl.long().view(-1)
             f_y = f_lbl.long().view(-1)
             L_cls_ret = 0.5 * (F.cross_entropy(ul_ret_il, ret_y) + F.cross_entropy(ul_ret_tl, ret_y))
-            L_cls_frg_raw = 0.5 * (F.cross_entropy(ul_frg_il, f_y) + F.cross_entropy(ul_frg_tl, f_y))
-            L_cls_frg = -torch.clamp(L_cls_frg_raw, max=cls_clamp)  # gradient ascent, capped
+
+            # Forget: 2 options based on uniform_weight
+            #   uniform_weight = 0 → NegGrad (legacy): push CE up, can over-train
+            #   uniform_weight > 0 → Uniform Prior: push softmax toward uniform (better for MIA)
+            if uniform_weight > 0:
+                # Uniform prior: KL(softmax(logits) || uniform)
+                n_cls = ul_frg_il.size(-1)
+                log_p_img = F.log_softmax(ul_frg_il, dim=-1)
+                log_p_txt = F.log_softmax(ul_frg_tl, dim=-1)
+                # KL(p || uniform) = sum p * log(p / (1/n)) = sum p*log(p) + log(n)
+                # Equivalent: minimize -entropy + log(n). Just minimize -entropy.
+                L_cls_frg_raw = -0.5 * (
+                    -(log_p_img.exp() * log_p_img).sum(dim=-1).mean()
+                    -(log_p_txt.exp() * log_p_txt).sum(dim=-1).mean()
+                )  # negative entropy (want to MAXIMIZE entropy → min negative entropy)
+                L_cls_frg = uniform_weight * L_cls_frg_raw
+            else:
+                # NegGrad: maximize CE on forget (capped)
+                L_cls_frg_raw = 0.5 * (F.cross_entropy(ul_frg_il, f_y) + F.cross_entropy(ul_frg_tl, f_y))
+                L_cls_frg = -torch.clamp(L_cls_frg_raw, max=cls_clamp) * kappa_frg
 
             loss = (alpha * L_ukr + beta * L_uu
                     + theta * L_md + gamma * L_mkr
                     + eta * L_re
-                    + kappa_ret * L_cls_ret + kappa_frg * L_cls_frg)
+                    + kappa_ret * L_cls_ret + L_cls_frg)
 
             optimizer.zero_grad()
             loss.backward()

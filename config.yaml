@@ -59,9 +59,9 @@ parameters:
   weight_decay:
     value: 0.01
   unlearn_epochs:
-    value: 10                                             # [EXP 005] was 15 (vừa đủ, tránh over-train)
+    value: 10                                             # 10 epochs đủ cho uniform prior
   early_stop_patience:
-    value: 3                                              # [EXP 005] was 6 (stop sớm khi CosSim giảm)
+    value: 999                                            # [EXP 006] EFFECTIVELY OFF — CosSim không hợp với NegGrad/Uniform
   grad_clip:
     value: 1.0
   warmup_proportion:
@@ -83,28 +83,29 @@ parameters:
 
   # ===== Loss weights (UR=alpha, UU=beta, MD=theta, MR=gamma, RE-anchor=eta) =====
   # "Unimodal" setting (best for 3% in paper)
-  # [EXP 005] Calibrated unlearning: BỎ HẲN UU/MD (gây hại trong Exp 04),
-  # tăng retention strong, giảm NegGrad về moderate (mục tiêu: forget CE ≈ test CE)
+  # [EXP 006] Uniform Prior unlearning — kỹ thuật mới (KL toward uniform thay vì NegGrad)
+  # Ý tưởng: thay vì đẩy CE forget lên cao (gây MIA tăng), đẩy softmax forget về uniform 25%/25%/25%/25%
+  # → Forget F1 thấp (random predictions) + forget loss ≈ test loss (MIA thấp)
   alpha:
-    value: 1.0                                            # [EXP 005] UKR mạnh để giữ retain embedding
+    value: 1.0                                            # UKR mạnh giữ retain embedding
   beta:
-    value: 0.0                                            # [EXP 005] BỎ HẲN UU (xáo trộn BERT không cần thiết)
+    value: 0.0                                            # UU off
   theta:
-    value: 0.0                                            # MD = 0, bỏ
+    value: 0.0                                            # MD off
   gamma:
-    value: 1.0                                            # [EXP 005] MKR mạnh để giữ joint retain
+    value: 1.0                                            # MKR mạnh giữ joint retain
   eta_re_anchor:
     value: 0.0                                            # tắt re-anchor
 
-  # ===== Classification losses (calibrated) =====
-  # Exp 04: kappa_frg=3.0 quá mạnh → CE forget bay lên 5.7 → MIA tăng vọt
-  # Exp 05: kappa_frg=1.0 moderate → đẩy forget CE đến ~2-3 (gần test) → MIA giảm
+  # ===== Classification losses — Uniform Prior mode (Exp 06) =====
   kappa_cls_retain:
-    value: 3.0                                            # [EXP 005] was 2.0 (anchor mạnh hơn)
+    value: 3.0                                            # CE retain (mạnh — anchor classifier giữ retain đúng)
   kappa_cls_forget:
-    value: 1.0                                            # [EXP 005] was 3.0 (giảm mạnh — tránh over-unlearn)
+    value: 0.0                                            # [EXP 006] TẮT NegGrad (gây MIA tăng)
   cls_forget_clamp:
-    value: 4.0                                            # [EXP 005] was 10 (cap thấp hơn → tránh đẩy quá)
+    value: 4.0                                            # (không dùng khi uniform_prior_weight > 0)
+  uniform_prior_weight:
+    value: 2.0                                            # [EXP 006] NEW — push forget softmax về uniform
   unfreeze_classifier_heads:
     value: true
 
