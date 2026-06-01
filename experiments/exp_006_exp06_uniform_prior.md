@@ -5,8 +5,10 @@
 | **Date** | 2026-06-01 |
 | **Git commit** | `81bd05c (dirty)` |
 | **Branch** | `master` |
-| **Status** | 🔄 Running |
-| **Duration** | <!-- AUTO:duration -->(auto)<!-- /AUTO --> |
+| **Status** | ✅ Auto-tracked (cần điền Observations + Conclusion) |
+| **Duration** | <!-- AUTO:duration -->
+0.222h
+<!-- /AUTO --> |
 
 ---
 
@@ -235,12 +237,34 @@ python training/forgetmi_loku.py --config config.yaml --fresh --exp exp06_unifor
 
 ### 5.1 Training curves
 <!-- AUTO:training_curves -->
-_(auto)_
+```
+[E00] loss=+4.158  UU=+17.075  MD=+0.000  UKR=+0.295  MKR=+1.854  RE=+0.000  CLS_ret=+1.231  CLS_frg=-1.684  | CosSim(ul,re)=0.6113
+[E01] loss=+3.547  UU=+17.088  MD=+0.000  UKR=+0.293  MKR=+1.452  RE=+0.000  CLS_ret=+1.180  CLS_frg=-1.739  | CosSim(ul,re)=0.5926
+[E02] loss=+3.345  UU=+17.087  MD=+0.000  UKR=+0.290  MKR=+1.386  RE=+0.000  CLS_ret=+1.149  CLS_frg=-1.778  | CosSim(ul,re)=0.5737
+[E03] loss=+3.204  UU=+17.087  MD=+0.000  UKR=+0.285  MKR=+1.338  RE=+0.000  CLS_ret=+1.131  CLS_frg=-1.811  | CosSim(ul,re)=0.5587
+[E04] loss=+3.094  UU=+17.087  MD=+0.000  UKR=+0.284  MKR=+1.298  RE=+0.000  CLS_ret=+1.118  CLS_frg=-1.841  | CosSim(ul,re)=0.5494
+[E05] loss=+2.994  UU=+17.091  MD=+0.000  UKR=+0.284  MKR=+1.260  RE=+0.000  CLS_ret=+1.106  CLS_frg=-1.867  | CosSim(ul,re)=0.5451
+[E06] loss=+2.896  UU=+17.093  MD=+0.000  UKR=+0.283  MKR=+1.221  RE=+0.000  CLS_ret=+1.094  CLS_frg=-1.892  | CosSim(ul,re)=0.5441
+[E07] loss=+2.799  UU=+17.095  MD=+0.000  UKR=+0.283  MKR=+1.182  RE=+0.000  CLS_ret=+1.083  CLS_frg=-1.916  | CosSim(ul,re)=0.5450
+[E08] loss=+2.702  UU=+17.093  MD=+0.000  UKR=+0.283  MKR=+1.143  RE=+0.000  CLS_ret=+1.072  CLS_frg=-1.941  | CosSim(ul,re)=0.5473
+[E09] loss=+2.606  UU=+17.091  MD=+0.000  UKR=+0.283  MKR=+1.103  RE=+0.000  CLS_ret=+1.062  CLS_frg=-1.967  | CosSim(ul,re)=0.5505
+```
 <!-- /AUTO -->
 
 ### 5.2 Final metrics
 <!-- AUTO:metrics -->
-_(auto)_
+| Metric | Value | Δ vs Paper (3%) |
+|---|---|---|
+| MIA ↓ | **0.672** | +0.101 ❌ |
+| Forget AUC ↓ | **0.839** | +0.104 ❌ |
+| Forget F1 ↓ | **0.654** | +0.261 ❌ |
+| Test AUC ↑ | **0.669** | +0.044 ✅ |
+| Test F1 ↑ | **0.387** | +0.137 ✅ |
+| 1−CosSim ↓ | **0.463** | +0.013 ❌ |
+| Time (h) | **0.222** | -4.778 ✅ |
+| GPU peak (GB) | **11.76** | — |
+| Trainable params | **0.395%** | (vs 100% paper) |
+
 <!-- /AUTO -->
 
 ---
