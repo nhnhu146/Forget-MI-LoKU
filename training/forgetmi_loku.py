@@ -512,9 +512,12 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
     kappa_ret = float(getattr(args, 'kappa_cls_retain', 1.0))   # keep retain classification correct
     kappa_frg = float(getattr(args, 'kappa_cls_forget', 0.5))   # NegGrad weight (legacy)
     cls_clamp = float(getattr(args, 'cls_forget_clamp', 5.0))   # cap forget CE to avoid divergence
-    # Uniform-prior unlearning (NEW): push forget predictions toward uniform distribution
-    # Better than NegGrad: Forget F1 ↓ (random predictions) + MIA ↓ (forget loss ≈ test loss)
-    uniform_weight = float(getattr(args, 'uniform_prior_weight', 0.0))   # 0 = disabled (legacy NegGrad)
+    # Uniform-prior unlearning: push forget predictions toward uniform distribution
+    uniform_weight = float(getattr(args, 'uniform_prior_weight', 0.0))
+    # NEW (Exp 07): Teacher-Student Distillation — student học model_re trên BOTH retain + forget
+    # Triết lý: model_re chưa từng thấy forget → student sẽ bắt chước → forget loss ≈ test loss → MIA thấp
+    distill_ret_w = float(getattr(args, 'distill_retain_weight', 0.0))   # KL(student || teacher) trên retain
+    distill_frg_w = float(getattr(args, 'distill_forget_weight', 0.0))   # KL trên forget — CHÌA KHÓA
     eval_subset = Subset(datasets['retain'],
                          list(range(min(200, len(datasets['retain'])))))
 
@@ -532,7 +535,7 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
                                num_workers=nw)
         epoch_iter = tqdm(zip(forget_dl, rand_dl, retain_dl), desc=f"Epoch {epoch}")
         agg = {'UU': 0, 'MD': 0, 'UKR': 0, 'MKR': 0, 'RE_anchor': 0,
-               'CLS_ret': 0, 'CLS_frg': 0, 'Total': 0}
+               'CLS_ret': 0, 'CLS_frg': 0, 'DSL_ret': 0, 'DSL_frg': 0, 'Total': 0}
         steps = 0
 
         for fb, rb, retb in epoch_iter:
@@ -541,15 +544,25 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
             rnd_in, _, _ = get_model_inputs(args, rb, device)
 
             # Frozen forward passes (fp16 via autocast)
+            need_teacher_distill = distill_ret_w > 0 or distill_frg_w > 0
             with torch.no_grad(), torch.autocast(device_type='cuda'):
                 og_ret_i, _, og_ret_t, _ = model_og(**ret_in)[:4]
                 og_rnd_i, _, og_rnd_t, _ = model_og(**rnd_in)[:4]
                 if use_re_anchor:
                     re_ret_i, _, re_ret_t, _ = model_re(**ret_in)[:4]
+                # Teacher forward passes for distillation (Exp 07)
+                if need_teacher_distill:
+                    teach_ret = model_re(**ret_in)[:4]      # (z_img, logits_img, z_txt, logits_txt)
+                    teach_frg = model_re(**f_in)[:4]
             og_ret_i = og_ret_i.float(); og_ret_t = og_ret_t.float()
             og_rnd_i = og_rnd_i.float(); og_rnd_t = og_rnd_t.float()
             if use_re_anchor:
                 re_ret_i = re_ret_i.float(); re_ret_t = re_ret_t.float()
+            if need_teacher_distill:
+                teach_ret_il = teach_ret[1].float()
+                teach_ret_tl = teach_ret[3].float()
+                teach_frg_il = teach_frg[1].float()
+                teach_frg_tl = teach_frg[3].float()
 
             # Unlearning model forward (trainable) — also capture logits for classification loss
             ul_ret_i, ul_ret_il, ul_ret_t, ul_ret_tl = model_ul(**ret_in)[:4]
@@ -618,10 +631,30 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
                 L_cls_frg_raw = 0.5 * (F.cross_entropy(ul_frg_il, f_y) + F.cross_entropy(ul_frg_tl, f_y))
                 L_cls_frg = -torch.clamp(L_cls_frg_raw, max=cls_clamp) * kappa_frg
 
+            # ----- Teacher-Student Distillation (Exp 07) -----
+            # KL(student || teacher) on retain AND forget. Teacher = model_re (chưa từng thấy forget)
+            # → student bắt chước teacher → forget treated như test (chưa thấy) → MIA thấp
+            L_distill_ret = torch.tensor(0.0, device=device)
+            L_distill_frg = torch.tensor(0.0, device=device)
+            if need_teacher_distill:
+                # Use temperature softening for stable KL
+                T = float(getattr(args, 'distill_temperature', 2.0))
+                def _kl(student, teacher):
+                    return F.kl_div(
+                        F.log_softmax(student / T, dim=-1),
+                        F.softmax(teacher / T, dim=-1).detach(),
+                        reduction='batchmean',
+                    ) * (T * T)
+                if distill_ret_w > 0:
+                    L_distill_ret = 0.5 * (_kl(ul_ret_il, teach_ret_il) + _kl(ul_ret_tl, teach_ret_tl))
+                if distill_frg_w > 0:
+                    L_distill_frg = 0.5 * (_kl(ul_frg_il, teach_frg_il) + _kl(ul_frg_tl, teach_frg_tl))
+
             loss = (alpha * L_ukr + beta * L_uu
                     + theta * L_md + gamma * L_mkr
                     + eta * L_re
-                    + kappa_ret * L_cls_ret + L_cls_frg)
+                    + kappa_ret * L_cls_ret + L_cls_frg
+                    + distill_ret_w * L_distill_ret + distill_frg_w * L_distill_frg)
 
             optimizer.zero_grad()
             loss.backward()
@@ -637,6 +670,8 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
             agg['RE_anchor'] += L_re.item()
             agg['CLS_ret'] += L_cls_ret.item()
             agg['CLS_frg'] += L_cls_frg.item()
+            agg['DSL_ret'] += L_distill_ret.item()
+            agg['DSL_frg'] += L_distill_frg.item()
             agg['Total'] += loss.item()
             steps += 1
 
@@ -648,10 +683,10 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
         log = {'epoch': epoch, 'cossim_vs_re': cossim,
                **{f'loss/{k}': v for k, v in avg.items()}}
         wandb.log(log)
-        epoch_line = (f"[E{epoch:02d}] loss={avg['Total']:+.3f}  UU={avg['UU']:+.3f}  "
-                      f"MD={avg['MD']:+.3f}  UKR={avg['UKR']:+.3f}  MKR={avg['MKR']:+.3f}  "
-                      f"RE={avg['RE_anchor']:+.3f}  CLS_ret={avg['CLS_ret']:+.3f}  "
-                      f"CLS_frg={avg['CLS_frg']:+.3f}  | CosSim(ul,re)={cossim:.4f}")
+        epoch_line = (f"[E{epoch:02d}] loss={avg['Total']:+.3f}  UKR={avg['UKR']:+.3f}  "
+                      f"MKR={avg['MKR']:+.3f}  CLS_ret={avg['CLS_ret']:+.3f}  "
+                      f"DSL_ret={avg['DSL_ret']:+.4f}  DSL_frg={avg['DSL_frg']:+.4f}  "
+                      f"| CosSim(ul,re)={cossim:.4f}")
         print(epoch_line)
         if tracker is not None:
             tracker.log_epoch_line(epoch_line)
