@@ -59,9 +59,9 @@ parameters:
   weight_decay:
     value: 0.01
   unlearn_epochs:
-    value: 10                                             # 10 epochs đủ cho uniform prior
+    value: 8                                              # [EXP 08] ít hơn — subtraction làm việc tại init
   early_stop_patience:
-    value: 999                                            # [EXP 006] EFFECTIVELY OFF — CosSim không hợp với NegGrad/Uniform
+    value: 4                                              # [EXP 08] CosSim sẽ TĂNG (gần F_re hơn) → stop khi plateau
   grad_clip:
     value: 1.0
   warmup_proportion:
@@ -83,41 +83,41 @@ parameters:
 
   # ===== Loss weights (UR=alpha, UU=beta, MD=theta, MR=gamma, RE-anchor=eta) =====
   # "Unimodal" setting (best for 3% in paper)
-  # [EXP 007] Teacher-Student Distillation — hướng đi HOÀN TOÀN MỚI
-  # Triết lý: thay vì đẩy forget classifier sai (gây MIA tăng), DẠY student bắt chước
-  # model_re (đã retrain không có forget). Vì model_re "không biết" forget → student
-  # cũng "không biết" → forget loss distribution giống test → MIA THẤP tự nhiên.
-  # Approach này có trong SCRUB, BadT papers — well-established.
+  # [EXP 008] TRUE LoKU (FILA subtraction) + Retain-only training
+  # Sau 7 exps, đọc lại LoKU paper kỹ → tìm ra cái thiếu: subtraction tại init!
+  # FILA paper: W* = W - B*A* (TRỪ forget direction), LoRA giữ direction.
+  # Training CHỈ giữ retain → khi LoRA giảm về 0, model = W - sub → forget bị xóa thật.
+  # Exp 07 phát hiện distill_forget gây giữ forget → BỎ luôn. Chỉ giữ retain signals.
   alpha:
-    value: 0.5                                            # [EXP 007] UKR nhẹ (distillation đã giữ retain)
+    value: 1.0                                            # UKR mạnh - giữ retain embedding
   beta:
-    value: 0.0                                            # UU off
+    value: 0.0                                            # UU off - subtraction xử lý forget
   theta:
     value: 0.0                                            # MD off
   gamma:
-    value: 0.5                                            # [EXP 007] MKR nhẹ (distillation đã giữ joint)
+    value: 1.0                                            # MKR mạnh - giữ joint retain
   eta_re_anchor:
-    value: 0.0                                            # tắt re-anchor (distill thay thế)
+    value: 0.0                                            # tắt re-anchor
 
-  # ===== Classification losses — TẮT HẾT (Exp 07 dùng distillation thay) =====
+  # ===== Classification losses (retain only) =====
   kappa_cls_retain:
-    value: 0.5                                            # CE nhẹ giữ classifier ổn định
+    value: 2.0                                            # CE retain MẠNH - anchor classifier
   kappa_cls_forget:
-    value: 0.0                                            # TẮT NegGrad (đã chứng minh gây MIA tăng)
+    value: 0.0                                            # KHÔNG đụng vào forget data
   cls_forget_clamp:
     value: 4.0
   uniform_prior_weight:
-    value: 0.0                                            # TẮT uniform prior (cũng gây MIA tăng)
+    value: 0.0
   unfreeze_classifier_heads:
     value: true
 
-  # ===== Teacher-Student Distillation (KEY của Exp 07) =====
+  # ===== Distillation (retain ONLY) =====
   distill_retain_weight:
-    value: 2.0                                            # KL(student || teacher) trên retain — keep utility
+    value: 1.5                                            # KL teacher trên RETAIN - giữ utility
   distill_forget_weight:
-    value: 4.0                                            # [EXP 07 KEY] KL trên forget — student học teacher "không biết forget"
+    value: 0.0                                            # [EXP 08 KEY] BỎ - đây là lỗi Exp 07
   distill_temperature:
-    value: 2.0                                            # softening temperature (chuẩn distillation)
+    value: 2.0
 
   # ===== Forget-margin (bounded loss) =====
   forget_margin:
@@ -139,7 +139,10 @@ parameters:
   fisher_batch_size:
     value: 16
   loku_init_scale:
-    value: 0.05                                           # small → base behavior preserved at init
+    value: 0.05                                           # only used when loku_subtract_scale = 0
+  loku_subtract_scale:
+    value: 1.0                                            # [EXP 08 KEY] TRUE LoKU FILA: W* = W - B*A* * scale
+                                                          # 0 = soft init (legacy), >0 = real subtraction
 
   # ===== Model architecture flags =====
   bert_pool_last_hidden:

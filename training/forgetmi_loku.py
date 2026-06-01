@@ -300,23 +300,27 @@ def compute_fisher_importance(model, dataloader, device, target_modules, args,
 
 
 def apply_loku_soft_init(model, forget_imp, retain_imp, target_modules,
-                         r, init_scale=0.05):
+                         r, init_scale=0.05, subtract_scale=0.0):
     """
-    Soft LoKU init: base weights UNTOUCHED. LoRA initialized via
-    importance-weighted truncated SVD, scaled small so initial forward
-    behaves like the original model.
+    LoKU init with 2 modes:
+      - subtract_scale = 0 (soft init): base UNTOUCHED, LoRA = small init.
+        Forward init ≈ W_og + small_perturb. Training adds knowledge.
+      - subtract_scale > 0 (TRUE LoKU FILA): base BỊ TRỪ forget direction.
+        W' = W - B*A * peft_scaling * subtract_scale
+        LoRA holds forget direction (B,A scaled by sqrt(subtract_scale)).
+        Forward init = W_og (unchanged behavior).
+        Training drives LoRA away → reveals subtraction → real unlearning.
 
     For each target weight W:
-      imp = forget_imp / (retain_imp + eps)   # relative forget-importance
-      Wp  = sqrt(imp) * W                      # scale rows by importance
+      imp_rel = forget_imp / (retain_imp + eps)
+      Wp  = sqrt(row_imp) * W
       U,S,V = svd_lowrank(Wp, r)
-      lora_A = (V * sqrt(S)).T * scale
-      lora_B = (U * sqrt(S))   * scale
+      A_raw = (V * sqrt(S)).T
+      B_raw = (U * sqrt(S)) / sqrt(row_imp)
     """
     matched, skipped = 0, 0
     for name, f_imp in forget_imp.items():
         r_imp = retain_imp.get(name, torch.zeros_like(f_imp))
-        # Relative importance, capped to avoid blowups
         rel = (f_imp / (r_imp + 1e-6)).clamp(0, 1e3)
         path = name.replace('.weight', '')
         try:
@@ -324,6 +328,7 @@ def apply_loku_soft_init(model, forget_imp, retain_imp, target_modules,
             base = mod.base_layer
             lora_A = mod.lora_A['default']
             lora_B = mod.lora_B['default']
+            peft_scaling = mod.scaling['default']
         except (AttributeError, KeyError):
             skipped += 1
             continue
@@ -338,12 +343,24 @@ def apply_loku_soft_init(model, forget_imp, retain_imp, target_modules,
             continue
 
         S_sqrt = torch.sqrt(S + 1e-8)
-        new_A = (V * S_sqrt).t() * init_scale
-        new_B = (U * S_sqrt) * init_scale
-        lora_A.weight.data = new_A.to(lora_A.weight.dtype)
-        lora_B.weight.data = new_B.to(lora_B.weight.dtype)
+        A_raw = (V * S_sqrt).t()                          # shape [r, in]
+        B_raw = (U * S_sqrt) / (row_imp[:, None] + 1e-6)  # shape [out, r]
+
+        if subtract_scale > 0:
+            # TRUE LoKU FILA: subtract from base, init LoRA to undo subtraction at start
+            subtraction = (B_raw @ A_raw) * peft_scaling * subtract_scale
+            base.weight.data -= subtraction.to(base.weight.dtype)
+            # Set LoRA = B,A scaled by sqrt(subtract_scale) so peft forward stores back the direction
+            scale_sqrt = subtract_scale ** 0.5
+            lora_A.weight.data = (A_raw * scale_sqrt).to(lora_A.weight.dtype)
+            lora_B.weight.data = (B_raw * scale_sqrt).to(lora_B.weight.dtype)
+        else:
+            # Soft init (legacy)
+            lora_A.weight.data = (A_raw * init_scale).to(lora_A.weight.dtype)
+            lora_B.weight.data = (B_raw * init_scale).to(lora_B.weight.dtype)
         matched += 1
-    print(f"✅ LoKU soft-init applied to {matched} layers ({skipped} skipped)")
+    mode = f"TRUE-SUBTRACTION (scale={subtract_scale})" if subtract_scale > 0 else f"soft (scale={init_scale})"
+    print(f"✅ LoKU init [{mode}] applied to {matched} layers ({skipped} skipped)")
 
 
 # ============================================================================
@@ -825,6 +842,7 @@ def main():
         model_unlearn, f_imp, r_imp, target_modules,
         r=int(config.lora_r),
         init_scale=float(getattr(config, 'loku_init_scale', 0.05)),
+        subtract_scale=float(getattr(config, 'loku_subtract_scale', 0.0)),
     )
 
     # ----- Unfreeze classifier heads -----
