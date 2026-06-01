@@ -535,6 +535,10 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
     # Triết lý: model_re chưa từng thấy forget → student sẽ bắt chước → forget loss ≈ test loss → MIA thấp
     distill_ret_w = float(getattr(args, 'distill_retain_weight', 0.0))   # KL(student || teacher) trên retain
     distill_frg_w = float(getattr(args, 'distill_forget_weight', 0.0))   # KL trên forget — CHÌA KHÓA
+    # NEW (Exp 09): Inverted Hinge Loss (IHL) — từ paper LoKU
+    # L_IHL = 1 + p(true_forget) - max_{v≠true}(p(v))
+    # Bounded in [0, 2], self-stopping (giảm tự nhiên khi unlearning đạt) → an toàn hơn NegGrad
+    ihl_forget_w = float(getattr(args, 'ihl_forget_weight', 0.0))
     eval_subset = Subset(datasets['retain'],
                          list(range(min(200, len(datasets['retain'])))))
 
@@ -552,7 +556,8 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
                                num_workers=nw)
         epoch_iter = tqdm(zip(forget_dl, rand_dl, retain_dl), desc=f"Epoch {epoch}")
         agg = {'UU': 0, 'MD': 0, 'UKR': 0, 'MKR': 0, 'RE_anchor': 0,
-               'CLS_ret': 0, 'CLS_frg': 0, 'DSL_ret': 0, 'DSL_frg': 0, 'Total': 0}
+               'CLS_ret': 0, 'CLS_frg': 0, 'DSL_ret': 0, 'DSL_frg': 0,
+               'IHL_frg': 0, 'Total': 0}
         steps = 0
 
         for fb, rb, retb in epoch_iter:
@@ -667,11 +672,30 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
                 if distill_frg_w > 0:
                     L_distill_frg = 0.5 * (_kl(ul_frg_il, teach_frg_il) + _kl(ul_frg_tl, teach_frg_tl))
 
+            # ----- Inverted Hinge Loss (IHL) — Exp 09 -----
+            # L_IHL = 1 + p(true_forget) - max_{v≠true}(p(v))
+            # Bounded [0, 2], self-stopping. Adapted from LoKU paper (Sec. 3.3).
+            L_ihl = torch.tensor(0.0, device=device)
+            if ihl_forget_w > 0:
+                n_cls = ul_frg_il.size(-1)
+                probs_img = F.softmax(ul_frg_il, dim=-1)
+                probs_txt = F.softmax(ul_frg_tl, dim=-1)
+                # Mask true class to find max(p) over OTHER classes
+                mask = F.one_hot(f_y, n_cls).bool()
+                p_true_img = probs_img.gather(1, f_y.unsqueeze(1)).squeeze(1)
+                p_true_txt = probs_txt.gather(1, f_y.unsqueeze(1)).squeeze(1)
+                p_other_max_img = probs_img.masked_fill(mask, -1.0).max(dim=-1)[0]
+                p_other_max_txt = probs_txt.masked_fill(mask, -1.0).max(dim=-1)[0]
+                L_ihl_img = (1.0 + p_true_img - p_other_max_img).mean()
+                L_ihl_txt = (1.0 + p_true_txt - p_other_max_txt).mean()
+                L_ihl = 0.5 * (L_ihl_img + L_ihl_txt)
+
             loss = (alpha * L_ukr + beta * L_uu
                     + theta * L_md + gamma * L_mkr
                     + eta * L_re
                     + kappa_ret * L_cls_ret + L_cls_frg
-                    + distill_ret_w * L_distill_ret + distill_frg_w * L_distill_frg)
+                    + distill_ret_w * L_distill_ret + distill_frg_w * L_distill_frg
+                    + ihl_forget_w * L_ihl)
 
             optimizer.zero_grad()
             loss.backward()
@@ -689,6 +713,7 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
             agg['CLS_frg'] += L_cls_frg.item()
             agg['DSL_ret'] += L_distill_ret.item()
             agg['DSL_frg'] += L_distill_frg.item()
+            agg['IHL_frg'] += L_ihl.item()
             agg['Total'] += loss.item()
             steps += 1
 
@@ -702,7 +727,7 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
         wandb.log(log)
         epoch_line = (f"[E{epoch:02d}] loss={avg['Total']:+.3f}  UKR={avg['UKR']:+.3f}  "
                       f"MKR={avg['MKR']:+.3f}  CLS_ret={avg['CLS_ret']:+.3f}  "
-                      f"DSL_ret={avg['DSL_ret']:+.4f}  DSL_frg={avg['DSL_frg']:+.4f}  "
+                      f"DSL_ret={avg['DSL_ret']:+.4f}  IHL_frg={avg['IHL_frg']:+.4f}  "
                       f"| CosSim(ul,re)={cossim:.4f}")
         print(epoch_line)
         if tracker is not None:
