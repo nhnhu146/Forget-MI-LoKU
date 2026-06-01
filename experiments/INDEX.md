@@ -24,6 +24,7 @@ Sắp xếp theo thứ tự thời gian (mới nhất ở dưới). Auto-tracker
 | 005 | exp05_calibrated_neggrad | 2026-05-30 | 🔄 | 0.607 | 0.832 | 0.631 | 0.667 | 0.399 | 0.090 | 0.395% | _(auto, cần kết luận)_ |
 | 006 | exp06_uniform_prior | 2026-06-01 | 🔄 | 0.672 | 0.839 | 0.654 | 0.669 | 0.387 | 0.222 | 0.395% | _(auto, cần kết luận)_ |
 | 007 | exp07_teacher_distillation | 2026-06-01 | 🔄 | 0.657 | 0.819 | 0.497 | 0.687 | 0.324 | 0.232 | 0.395% | _(auto, cần kết luận)_ |
+| 008 | exp08_true_loku_fila_subtraction | 2026-06-01 | 🔄 | 0.562 | 0.833 | 0.589 | 0.679 | 0.388 | 0.139 | 0.395% | _(auto, cần kết luận)_ |
 
 **Reference (paper Forget-MI, 3%)**: MIA=0.571 | Df_AUC=0.735 | Df_F1=0.393 | Dt_AUC=0.625 | Dt_F1=0.250 | Time=5h | Trainable=100%
 
