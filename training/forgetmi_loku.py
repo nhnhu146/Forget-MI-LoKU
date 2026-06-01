@@ -170,17 +170,22 @@ def build_dataset(args, tokenizer):
     cached_noisy = os.path.join(args.text_data_dir,
                                 f"cachednoisyfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}")
 
-    if os.path.exists(cached) and os.path.exists(cached_noisy) and not args.reprocess_input_data:
-        # weights_only=False needed for PyTorch 2.6+ (cached files contain custom InputFeatures class)
-        features = torch.load(cached, weights_only=False)
-        noisy_features = torch.load(cached_noisy, weights_only=False)
-    else:
+    def _regenerate():
         synonyms = pd.read_csv(args.synonyms_dir)
         examples = processor.get_all_examples(args.text_data_dir)
         noisy_examples = processor.get_noisy_examples(args.text_data_dir, synonyms, args.text_noise_level)
-        features = get_features(examples, processor.get_labels(), args.max_seq_length, tokenizer)
-        noisy_features = get_features(noisy_examples, processor.get_labels(), args.max_seq_length, tokenizer)
-        torch.save(features, cached); torch.save(noisy_features, cached_noisy)
+        feats = get_features(examples, processor.get_labels(), args.max_seq_length, tokenizer)
+        noisy_feats = get_features(noisy_examples, processor.get_labels(), args.max_seq_length, tokenizer)
+        torch.save(feats, cached); torch.save(noisy_feats, cached_noisy)
+        return feats, noisy_feats
+
+    if os.path.exists(cached) and os.path.exists(cached_noisy) and not args.reprocess_input_data:
+        print("📂 Loading cached features...")
+        features = torch.load(cached, weights_only=False)
+        noisy_features = torch.load(cached_noisy, weights_only=False)
+    else:
+        print("🔨 Generating features (lần đầu, ~5 phút)...")
+        features, noisy_features = _regenerate()
 
     all_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in features}
     noisy_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in noisy_features}
@@ -188,6 +193,28 @@ def build_dataset(args, tokenizer):
     (retain_l, retain_ids, val_l, val_ids,
      test_l, test_ids, rand_l, rand_ids, forget_l, forget_ids) = \
         data_split(args.data_split_path, args.forget_set_path, args.validation_ratio)
+
+    # CACHE INTEGRITY CHECK: if cache report_ids không khớp với split → cache stale, regenerate
+    sample_ids = list(retain_ids.values())[:50]
+    matches = sum(1 for rid in sample_ids if rid in all_txt)
+    if sample_ids and matches == 0:
+        print(f"⚠️  Cache mismatch! 0/{len(sample_ids)} sample retain IDs khớp với cache.")
+        print(f"   → Đang xóa cache stale và regenerate (1 lần, ~5 phút)...")
+        for p in (cached, cached_noisy):
+            if os.path.exists(p):
+                os.remove(p)
+        features, noisy_features = _regenerate()
+        all_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in features}
+        noisy_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in noisy_features}
+        # Recheck
+        matches = sum(1 for rid in sample_ids if rid in all_txt)
+        if matches == 0:
+            raise RuntimeError(
+                f"Sau khi regenerate cache vẫn 0/{len(sample_ids)} match. "
+                f"Có vấn đề với data_split file hoặc text_data. "
+                f"Kiểm tra: data_split={args.data_split_path}, text_data={args.text_data_dir}/all_data.tsv"
+            )
+        print(f"   ✅ Sau regenerate: {matches}/{len(sample_ids)} match.")
 
     def extract(mapping, ids):
         t, m, s, l = {}, {}, {}, {}
