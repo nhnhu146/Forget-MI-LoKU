@@ -87,6 +87,30 @@ def get_module(model, path):
     return reduce(getattr, path.split('.'), model)
 
 
+def resolve_image_targets(model, last_k_blocks, include_fc1=False, total_layers=7):
+    """
+    [EXP 10] Modality-aware PEFT: resolve FULL module names of Conv2d layers in the
+    last-k residual stages of the image encoder (img_model.layer{N}), plus optionally
+    the image classifier head (img_model.fc1).
+
+    Returns full dotted names (e.g. 'img_model.layer7.0.conv1') so they can be passed
+    BOTH to PEFT LoraConfig.target_modules (exact-match) and to the Fisher/FILA routine
+    (substring-match). Image convs carry the high-level semantics that drive the image
+    logits — and the MIA attack reads ONLY img_logits — so this is where unlearning the
+    forget set actually moves the needle.
+    """
+    targets = []
+    if last_k_blocks and last_k_blocks > 0:
+        sel = set(range(max(1, total_layers - last_k_blocks + 1), total_layers + 1))
+        prefixes = tuple(f"img_model.layer{n}." for n in sel)
+        for name, mod in model.named_modules():
+            if isinstance(mod, torch.nn.Conv2d) and name.startswith(prefixes):
+                targets.append(name)
+    if include_fc1:
+        targets.append('img_model.fc1')
+    return targets
+
+
 def count_params(model):
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -299,10 +323,35 @@ def compute_fisher_importance(model, dataloader, device, target_modules, args,
     return {k: v / n for k, v in importance.items()}
 
 
-def apply_loku_soft_init(model, forget_imp, retain_imp, target_modules,
-                         r, init_scale=0.05, subtract_scale=0.0):
+def _fila_decompose(W2d, rel2d, r, target_r):
     """
-    LoKU init with 2 modes:
+    FILA importance-weighted low-rank decomposition of a 2D weight matrix.
+    Returns (A_pad, B_pad, sub2d) where:
+      sub2d = B_raw @ A_raw                 (the forget direction, before scaling)
+      A_pad : [target_r, in]   (rows beyond effective rank are zero)
+      B_pad : [out, target_r]  (cols beyond effective rank are zero)
+    target_r is the rank slot count PEFT allocated; effective rank is clamped to fit
+    small matrices (e.g. the 4-class fc1 head) so svd_lowrank never overruns.
+    """
+    out_dim, in_dim = W2d.shape
+    row_imp = rel2d.mean(dim=1).sqrt() + 1e-6              # [out]
+    Wp = row_imp[:, None] * W2d
+    r_eff = max(1, min(r, min(out_dim, in_dim) - 1))
+    U, S, V = torch.svd_lowrank(Wp, q=r_eff)              # U[out,r_eff] S[r_eff] V[in,r_eff]
+    S_sqrt = torch.sqrt(S + 1e-8)
+    A_raw = (V * S_sqrt).t()                              # [r_eff, in]
+    B_raw = (U * S_sqrt) / (row_imp[:, None] + 1e-6)      # [out, r_eff]
+    sub2d = B_raw @ A_raw                                 # [out, in]
+    A_pad = W2d.new_zeros(target_r, in_dim);  A_pad[:r_eff] = A_raw
+    B_pad = W2d.new_zeros(out_dim, target_r); B_pad[:, :r_eff] = B_raw
+    return A_pad, B_pad, sub2d
+
+
+def apply_loku_soft_init(model, forget_imp, retain_imp, target_modules,
+                         r, init_scale=0.05, subtract_scale=0.0,
+                         image_target_names=None, image_subtract_scale=None):
+    """
+    LoKU init with 2 modes (works for both nn.Linear and nn.Conv2d targets):
       - subtract_scale = 0 (soft init): base UNTOUCHED, LoRA = small init.
         Forward init ≈ W_og + small_perturb. Training adds knowledge.
       - subtract_scale > 0 (TRUE LoKU FILA): base BỊ TRỪ forget direction.
@@ -311,14 +360,15 @@ def apply_loku_soft_init(model, forget_imp, retain_imp, target_modules,
         Forward init = W_og (unchanged behavior).
         Training drives LoRA away → reveals subtraction → real unlearning.
 
-    For each target weight W:
-      imp_rel = forget_imp / (retain_imp + eps)
-      Wp  = sqrt(row_imp) * W
-      U,S,V = svd_lowrank(Wp, r)
-      A_raw = (V * sqrt(S)).T
-      B_raw = (U * sqrt(S)) / sqrt(row_imp)
+    [EXP 10] Image modules (image_target_names) can use a separate, usually gentler
+    image_subtract_scale because conv blocks + BatchNorm are more sensitive than BERT
+    attention. Conv weights [out,in,kh,kw] are reshaped to 2D for the SVD and the
+    resulting factors reshaped back to PEFT's conv-LoRA shapes
+    (lora_A=[r,in,kh,kw], lora_B=[out,r,1,1]) — the lora_B∘lora_A composition then
+    reproduces exactly the subtracted direction, so init forward is identity.
     """
     matched, skipped = 0, 0
+    image_set = set(image_target_names) if image_target_names else set()
     for name, f_imp in forget_imp.items():
         r_imp = retain_imp.get(name, torch.zeros_like(f_imp))
         rel = (f_imp / (r_imp + 1e-6)).clamp(0, 1e3)
@@ -333,33 +383,47 @@ def apply_loku_soft_init(model, forget_imp, retain_imp, target_modules,
             skipped += 1
             continue
 
+        # per-modality subtract scale
+        is_image = path in image_set
+        scale = image_subtract_scale if (is_image and image_subtract_scale is not None) else subtract_scale
+
         W = base.weight.data.float()
-        row_imp = rel.mean(dim=1).sqrt() + 1e-6
-        Wp = row_imp[:, None] * W
+        target_r = lora_A.weight.shape[0]                 # rank slots PEFT allocated
+        is_conv = (W.dim() == 4)
+        if is_conv:
+            out_dim, in_dim, kh, kw = W.shape
+            W2d = W.reshape(out_dim, -1)
+            rel2d = rel.reshape(out_dim, -1)
+        else:
+            W2d, rel2d = W, rel
+
         try:
-            U, S, V = torch.svd_lowrank(Wp, q=r)
+            A_pad, B_pad, sub2d = _fila_decompose(W2d, rel2d, r, target_r)
         except Exception:
             skipped += 1
             continue
 
-        S_sqrt = torch.sqrt(S + 1e-8)
-        A_raw = (V * S_sqrt).t()                          # shape [r, in]
-        B_raw = (U * S_sqrt) / (row_imp[:, None] + 1e-6)  # shape [out, r]
-
-        if subtract_scale > 0:
+        if scale > 0:
             # TRUE LoKU FILA: subtract from base, init LoRA to undo subtraction at start
-            subtraction = (B_raw @ A_raw) * peft_scaling * subtract_scale
+            subtraction = sub2d * peft_scaling * scale
+            if is_conv:
+                subtraction = subtraction.reshape(out_dim, in_dim, kh, kw)
             base.weight.data -= subtraction.to(base.weight.dtype)
-            # Set LoRA = B,A scaled by sqrt(subtract_scale) so peft forward stores back the direction
-            scale_sqrt = subtract_scale ** 0.5
-            lora_A.weight.data = (A_raw * scale_sqrt).to(lora_A.weight.dtype)
-            lora_B.weight.data = (B_raw * scale_sqrt).to(lora_B.weight.dtype)
+            sq = scale ** 0.5
+            A_set, B_set = A_pad * sq, B_pad * sq
         else:
             # Soft init (legacy)
-            lora_A.weight.data = (A_raw * init_scale).to(lora_A.weight.dtype)
-            lora_B.weight.data = (B_raw * init_scale).to(lora_B.weight.dtype)
+            A_set, B_set = A_pad * init_scale, B_pad * init_scale
+
+        if is_conv:
+            lora_A.weight.data = A_set.reshape(target_r, in_dim, kh, kw).to(lora_A.weight.dtype)
+            lora_B.weight.data = B_set.reshape(out_dim, target_r, 1, 1).to(lora_B.weight.dtype)
+        else:
+            lora_A.weight.data = A_set.to(lora_A.weight.dtype)
+            lora_B.weight.data = B_set.to(lora_B.weight.dtype)
         matched += 1
-    mode = f"TRUE-SUBTRACTION (scale={subtract_scale})" if subtract_scale > 0 else f"soft (scale={init_scale})"
+    mode = f"TRUE-SUBTRACTION (txt={subtract_scale}, img={image_subtract_scale})" \
+        if subtract_scale > 0 or (image_subtract_scale or 0) > 0 else f"soft (scale={init_scale})"
     print(f"✅ LoKU init [{mode}] applied to {matched} layers ({skipped} skipped)")
 
 
@@ -836,6 +900,21 @@ def main():
 
     # ----- Fisher importance (BEFORE PEFT wrapping) -----
     target_modules = list(getattr(config, 'lora_target_modules', ['query', 'key', 'value']))
+    # [EXP 10] Modality-aware PEFT: also unlearn the IMAGE pathway (MIA reads img_logits only,
+    # and the text-only LoRA/FILA of exp08 left Forget-AUC stuck at 0.833). Resolve full names
+    # of Conv2d in the last-k image stages (+ optional fc1) and FILA-subtract them too.
+    img_last_k = int(getattr(config, 'lora_image_last_k_blocks', 0))
+    img_inc_fc1 = bool(getattr(config, 'lora_image_include_fc1', False))
+    image_targets = resolve_image_targets(model_og, img_last_k, img_inc_fc1)
+    image_set = set(image_targets)
+    img_sub_scale = float(getattr(config, 'loku_image_subtract_scale',
+                                  getattr(config, 'loku_subtract_scale', 0.0)))
+    if image_targets:
+        target_modules = target_modules + image_targets
+        print(f"🖼️  Image PEFT targets (+{len(image_targets)}, "
+              f"last_k={img_last_k}, fc1={img_inc_fc1}, img_subtract={img_sub_scale}):")
+        for t in image_targets:
+            print(f"     - {t}")
     print(f"🎯 LoRA target modules: {target_modules}")
     print("🧮 Computing Fisher Information...")
     fisher_bs = int(getattr(config, 'fisher_batch_size', config.unlearn_batch_size))
@@ -868,6 +947,8 @@ def main():
         r=int(config.lora_r),
         init_scale=float(getattr(config, 'loku_init_scale', 0.05)),
         subtract_scale=float(getattr(config, 'loku_subtract_scale', 0.0)),
+        image_target_names=image_set,
+        image_subtract_scale=img_sub_scale,
     )
 
     # ----- Unfreeze classifier heads -----
@@ -877,8 +958,11 @@ def main():
     if getattr(config, 'unfreeze_classifier_heads', True):
         try:
             n_before = sum(p.numel() for p in model_unlearn.parameters() if p.requires_grad)
-            for p in model_unlearn.img_model.fc1.parameters():
-                p.requires_grad = True
+            # [EXP 10] If fc1 is itself a PEFT target, it already trains via LoRA — don't
+            # also unfreeze its frozen base layer (would defeat the FILA subtraction).
+            if 'img_model.fc1' not in target_modules:
+                for p in model_unlearn.img_model.fc1.parameters():
+                    p.requires_grad = True
             for p in model_unlearn.text_model.classifier.parameters():
                 p.requires_grad = True
             n_after = sum(p.numel() for p in model_unlearn.parameters() if p.requires_grad)

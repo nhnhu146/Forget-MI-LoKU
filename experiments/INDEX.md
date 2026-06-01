@@ -70,6 +70,7 @@ Tick khi xong:
 ## Quick links
 
 - Template: [_TEMPLATE.md](_TEMPLATE.md)
+- **Nhật ký thay đổi code lớn**: [../CHANGELOG.md](../CHANGELOG.md)
 - Auto-tracker module: [../scripts/exp_tracker.py](../scripts/exp_tracker.py)
 - Báo cáo tổng: [../EXPERIMENT_REPORT.md](../EXPERIMENT_REPORT.md)
 - Code chính: [../training/forgetmi_loku.py](../training/forgetmi_loku.py)

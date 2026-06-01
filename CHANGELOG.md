@@ -1,0 +1,81 @@
+# CHANGELOG — Nhật ký thay đổi code lớn
+
+> Nơi ghi lại **các thay đổi code/kiến trúc đáng kể** (thêm cơ chế mới, đổi pipeline,
+> thêm loss/PEFT mới...). Khác với `experiments/exp_NNN_*.md` (chỉ track **config + kết quả**
+> của từng lần chạy), file này tập trung vào **"đã sửa gì trong code và vì sao"** để sau này
+> đọc lại không phải lần mò qua git diff.
+>
+> **Quy ước ghi** (mới nhất ở trên cùng):
+> - Mỗi mục: `## [tag/exp] — YYYY-MM-DD — tiêu đề ngắn`
+> - **Động cơ**: vì sao cần sửa (gắn với kết quả/bottleneck nào).
+> - **Thay đổi**: liệt kê file + hàm + ý chính (không cần dán code).
+> - **Config liên quan**: param mới/đổi trong `config.yaml`.
+> - **Kiểm chứng**: đã test/verify ra sao.
+> - **Rủi ro / cần theo dõi**: điều có thể hỏng, knob để revert.
+
+---
+
+## [exp10] — 2026-06-01 — Modality-aware PEFT: FILA subtraction lên nhánh ẢNH
+
+**Động cơ.** Chẩn đoán từ kết quả exp01–09: MIA (`evaluation/eval_unlearning.py`,
+`forgetmi_loku.py::per_sample_ce`) **chỉ dùng cross-entropy của `img_logits`** làm feature.
+Nhưng LoRA + FILA subtraction của exp08 **chỉ chạm BERT (text) `query/key/value`** — image
+encoder (`ImageResNet`) và `fc1` không bị đụng tới, các loss khi train lại chỉ chạy trên retain
+→ behavior trên forget của nhánh ảnh gần như không đổi → **Forget AUC kẹt ở 0.833** (gold
+retrained = 0.566). Nói cách khác: ta đang "quên" sai chỗ so với cái MIA đo.
+
+**Thay đổi.** (`training/forgetmi_loku.py`)
+- Thêm `resolve_image_targets(model, last_k_blocks, include_fc1)`: liệt kê **full-name** các
+  `nn.Conv2d` ở các stage cuối của image encoder (`img_model.layer{N}.*`), tùy chọn thêm
+  `img_model.fc1`. Trả full-name để dùng được cho cả PEFT (exact-match) lẫn Fisher (substring).
+- Tách `_fila_decompose()` và tổng quát hóa `apply_loku_soft_init()`:
+  - Hỗ trợ **Conv2d (weight 4D)**: reshape `[out,in,kh,kw]→[out,in·kh·kw]` để SVD, rồi reshape
+    factor về `lora_A=[r,in,kh,kw]`, `lora_B=[out,r,1,1]` (đúng API conv-LoRA của PEFT).
+  - **Clamp rank + zero-pad** để chạy được trên ma trận nhỏ (vd `fc1` 768→4).
+  - Thêm **scale riêng cho ảnh** (`image_subtract_scale`) vì conv + BatchNorm nhạy hơn BERT.
+- `run()`: mở rộng `target_modules` bằng image targets **trước** khi tính Fisher & wrap PEFT;
+  guard không unfreeze base của `fc1` khi `fc1` đã được PEFT-wrap.
+
+**Config liên quan.** (`config.yaml`) thêm:
+- `lora_image_last_k_blocks: 1` — 1 = chỉ `layer7`; 2 = +`layer6`; **0 = tắt (revert exp08)**.
+- `lora_image_include_fc1: false` — bật để FILA cả image classifier head.
+- `loku_image_subtract_scale: 0.5` — scale FILA cho ảnh (nhẹ hơn text=1.0).
+- `ihl_forget_weight: 0.0` — **tắt IHL** để cô lập hiệu ứng image-FILA (exp10 = exp08 + nhánh ảnh).
+
+**Kiểm chứng.**
+- `python -m py_compile training/forgetmi_loku.py` → OK.
+- Unit test với PEFT 0.19.1: `apply_loku_soft_init` giữ đúng **identity-at-init** (diff ~5e-7)
+  cho Conv2d / Linear / Linear rank-hạn-chế; shape conv-LoRA đúng.
+- `resolve_image_targets`: last_k=1 → 5 conv của layer7; last_k=2 → 10; last_k=0 → rỗng.
+
+**Rủi ro / cần theo dõi.**
+- FILA trên conv làm running-stats của BatchNorm layer7 lệch; `model.train()` mỗi epoch giúp BN
+  thích nghi lại trên retain, nhưng nếu **Test AUC tụt** → hạ `loku_image_subtract_scale` về 0.3.
+- Nếu forget vẫn mạnh → tăng `lora_image_last_k_blocks: 2` / scale `1.0` / bật `include_fc1`.
+- Revert nhanh: đặt `lora_image_last_k_blocks: 0`.
+
+---
+
+## [exp09] — 2026-06-01 — Inverted Hinge Loss (IHL)
+
+**Động cơ.** exp08 đạt MIA tốt nhất (0.562) nhưng Forget AUC/F1 vẫn cao → cần một forget-push
+"hiền" hơn NegGrad (vốn gây spike MIA ở exp04–06).
+
+**Thay đổi.** (`training/forgetmi_loku.py`, vùng loss ~L675) thêm `L_IHL = 1 + p(true) − max_{v≠true} p(v)`
+trên `img/txt logits` của forget, bounded [0,2], self-stopping. Thêm `ihl_forget_weight` vào tổng loss.
+
+**Config.** `ihl_forget_weight` (exp09 = 1.5). *(exp10 đặt lại 0.0 để cô lập.)*
+
+---
+
+## [exp08] — 2026-06-01 — TRUE LoKU FILA subtraction (mốc breakthrough)
+
+**Động cơ.** exp01–07 dùng soft-init (`init_scale=0.05`, không trừ gì) → mọi việc unlearn dồn
+vào training → chạm forget data → MIA tăng.
+
+**Thay đổi.** (`apply_loku_soft_init`) thêm chế độ **subtraction thật**: `W* = W − B·A·scaling·scale`,
+LoRA giữ forget direction; train retain-only → khi LoRA đi khỏi init thì lộ phần đã trừ = unlearn thật.
+
+**Config.** `loku_subtract_scale: 1.0` (0 = soft-init legacy). Tắt NegGrad/uniform/distill_forget.
+
+**Kết quả.** MIA 0.562 (✅ < paper 0.571), Test AUC 0.679, Time 0.139h. Forget AUC còn 0.833 → động cơ của exp09/exp10.
