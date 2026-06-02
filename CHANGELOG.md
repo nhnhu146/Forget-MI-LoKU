@@ -35,6 +35,13 @@ CÙNG một lượt forward (không tốn thêm GPU):
 **Kiểm chứng.** `py_compile` OK (cả exp_tracker.py); `_batch_means(201, 32)` → 7 batch-mean
 đúng, chunk-mean ≡ per-batch CE mean. MIA_persample giữ nguyên công thức cũ.
 
+**Sửa lỗi trung thực (cùng ngày).** Bản đầu subsample retain xuống 512 *trước* khi tính MIA
+→ MIA_paper chỉ train SVM trên ~16 retain batch-means (paper dùng full 5409 → ~169) nên KHÔNG
+trung thực, cho ra 0.143 không so sánh được. Sửa: `run_mia` dùng **FULL retain** (bỏ `max_retain`),
+cả 2 MIA lấy từ 1 lượt forward full retain; CosSim vẫn subsample (`eval_max_retain`) vì nó mới là
+phần tốn 2/3 thời gian (forward 2 model). Eval vẫn ~5× nhanh hơn bản gốc. Lưu ý: MIA_paper vốn THÔ
+(forget 201 mẫu / bs32 = 7 điểm → giá trị bội 1/7, phương sai cao) → bắt buộc multi-seed khi báo cáo.
+
 ---
 
 ## [eval-speedup] — 2026-06-02 — Tăng tốc bước evaluation ~6–10×

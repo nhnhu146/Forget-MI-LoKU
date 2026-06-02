@@ -509,19 +509,22 @@ def _batch_means(losses_1d, bs):
 
 
 def run_mia(model, retain_ds, test_ds, forget_ds, device, args, batch_size=32, seed=42,
-            max_retain=0, paper_batch_size=32):
+            paper_batch_size=32):
     """Compute TWO membership-inference metrics from ONE pass of per-sample losses
-    (returns a dict). The retain set is subsampled to max_retain before forwarding.
+    (returns a dict). Uses the FULL retain set — MIA forward is only ~1/3 of eval cost,
+    and MIA_paper needs full retain to faithfully match the original eval (the big eval
+    cost was CosSim's 2× full-retain pass, which is subsampled separately).
 
-      'persample' — LoKU metric (current): SVM on per-SAMPLE img-CE losses, retain/test
-                    balanced 1:1. Finer (uses all 201 forget samples).
-      'paper'     — replicates evaluation/eval_unlearning.py (the original Forget-MI MIA):
-                    per-BATCH MEAN loss, UNbalanced retain+test, SVC(C=3, rbf, gamma=auto).
-                    Lets results be compared to the paper's MIA methodology.
+      'persample' — LoKU metric: SVM on per-SAMPLE img-CE losses, retain/test balanced 1:1.
+                    Finer & stable (uses all 201 forget samples).
+      'paper'     — replicates evaluation/eval_unlearning.py (original Forget-MI MIA):
+                    per-BATCH MEAN loss over FULL retain+test (unbalanced), SVC(C=3,rbf,
+                    gamma=auto). NOTE: coarse — with a 201-sample forget set and bs=32 it
+                    yields only ~7 forget points, so the value is quantized to ~1/7 steps
+                    and high-variance → report over multiple seeds.
     Both = fraction of forget predicted as 'member' (label 1)."""
     from sklearn.svm import SVC
-    print("  computing per-sample losses...")
-    retain_ds = _subsample_dataset(retain_ds, max_retain, seed)
+    print("  computing per-sample losses (full retain)...")
     rl = per_sample_ce(model, retain_ds, device, args, batch_size)
     tl = per_sample_ce(model, test_ds, device, args, batch_size)
     fl = per_sample_ce(model, forget_ds, device, args, batch_size)
@@ -1075,17 +1078,18 @@ def main():
         p.requires_grad = False
     torch.cuda.empty_cache()
 
-    # Cap retain forwards during eval (0 = full, for exact reproducibility of old runs)
+    # Cap retain forwards for CosSim only (the 2× full-retain pass = main eval cost).
+    # MIA uses FULL retain so MIA_paper faithfully matches the original eval. (0 = full.)
     eval_max_retain = int(getattr(config, 'eval_max_retain', 512))
     if eval_max_retain and eval_max_retain > 0:
-        print(f"⚡ eval_max_retain={eval_max_retain} (subsample retain for MIA + CosSim)")
+        print(f"⚡ eval_max_retain={eval_max_retain} (subsample retain for CosSim; MIA uses full retain)")
 
     # Wrap MIA + perf eval in try/except so a single failure doesn't lose everything
     try:
         print("🛡️  Computing MIA scores (per-sample + paper-style)...")
         mia_res = run_mia(merged, datasets['retain'], datasets['test'], datasets['forget'],
                           device, config, batch_size=config.eval_batch_size,
-                          seed=int(config.random_seed), max_retain=eval_max_retain,
+                          seed=int(config.random_seed),
                           paper_batch_size=int(getattr(config, 'mia_paper_batch_size', 32)))
         mia = mia_res['persample']          # keep 'mia' = per-sample (existing metric/key)
         mia_paper = mia_res['paper']
@@ -1142,8 +1146,8 @@ def main():
     print("\n" + "─" * 60)
     print(" METRIC                    | VALUE   | PAPER TARGET ")
     print("─" * 60)
-    print(f"  MIA_persample (↓)        | {mia:.3f}  | (LoKU per-sample SVM)")
-    print(f"  MIA_paper     (↓)        | {mia_paper:.3f}  | 0.571 (3%) / 0.615 (6%) / 0.810 (10%)  ← so với paper")
+    print(f"  MIA_persample (↓)        | {mia:.3f}  | (LoKU per-sample SVM — ổn định)")
+    print(f"  MIA_paper     (↓)        | {mia_paper:.3f}  | 0.571 (3%) / 0.615 (6%) / 0.810 (10%)  ← paper-style (thô ~1/7, cần multi-seed)")
     print(f"  Forget AUC    (↓)        | {forget_m['AUC']:.3f}  | 0.735 (3%) / 0.654 (6%) / 0.656 (10%)")
     print(f"  Forget Mac-F1 (↓)        | {forget_m['Macro_F1']:.3f}  | 0.393 (3%) / 0.328 (6%) / 0.313 (10%)")
     print(f"  Test AUC      (↑)        | {test_m['AUC']:.3f}  | 0.625 (3%) / 0.599 (6%) / 0.565 (10%)")
