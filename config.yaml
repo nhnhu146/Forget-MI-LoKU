@@ -115,25 +115,26 @@ parameters:
   unfreeze_classifier_heads:
     value: true
 
-  # ===== Distillation (retain ONLY) =====
+  # ===== Distillation =====
+  # [EXP 11] BỎ phụ thuộc F_re khi TRAIN: retain-distill dùng teacher = F_og (model gốc,
+  # luôn có sẵn). F_re chỉ còn dùng để ĐÁNH GIÁ (CosSim) — hợp lệ. Forget không distill nữa
+  # (F_og biết forget) → forget xử lý bằng IHL bên dưới.
+  distill_teacher:
+    value: "og"                                           # "og" = F_og (exp11) | "re" = F_re (exp10c)
   distill_retain_weight:
-    value: 1.5                                            # KL teacher trên RETAIN - giữ utility
+    value: 1.5                                            # KL(student || F_og) trên RETAIN - giữ utility gốc
   distill_forget_weight:
-    value: 1.0                                            # [EXP 10c] NHẸ — ép logits forget khớp teacher retrained
-                                                          # (MIA=0). exp10/10b mở conv ảnh -> fit retain tốt -> forget
-                                                          # loss thấp -> MIA tăng 0.61. distill_forget kéo forget về
-                                                          # phân bố "chưa từng thấy" của F_re. exp07 dùng 4.0 (quá mạnh,
-                                                          # chưa có image-PEFT) nên hỏng; giờ 1.0 nhẹ + đúng nhánh ảnh.
+    value: 0.0                                            # [EXP 11] TẮT - cần F_re; thay bằng IHL
   distill_temperature:
     value: 2.0
 
   # ===== Inverted Hinge Loss (IHL) — từ paper LoKU =====
   # L_IHL = 1 + p(true_forget_label) - max_{v ≠ true}(p(v|x))
   # Bounded [0, 2], self-stopping khi unlearning đạt. An toàn hơn NegGrad (unbounded).
-  # [EXP 10] TẮT (0.0) để CÔ LẬP hiệu ứng image-FILA: exp10 = exp08 + image pathway,
-  # không trộn thêm forget-loss. IHL sẽ bật lại ở exp11 (kèm orthogonal projection).
+  # [EXP 11] BẬT IHL làm tín hiệu forget (bounded, KHÔNG cần teacher F_re) thay cho
+  # distill_forget. Đẩy forget loss lên kiểu self-stopping → ghìm MIA mà không lệ thuộc gold.
   ihl_forget_weight:
-    value: 0.0                                            # [EXP 10] off — isolate image-FILA
+    value: 1.5                                            # [EXP 11] on — forget push không cần F_re
 
   # ===== Forget-margin (bounded loss) =====
   forget_margin:

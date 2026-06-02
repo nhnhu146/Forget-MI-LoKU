@@ -15,6 +15,32 @@
 
 ---
 
+## [exp11] — 2026-06-02 — Bỏ phụ thuộc F_re khi train (retain-distill ← F_og + IHL)
+
+**Động cơ.** exp10c đạt số đẹp (thắng paper cả 5 metric qua 3 seed) NHƯNG distill dùng
+**F_re (model retrained)** làm teacher → (1) cần retrain mới có F_re ⇒ phá tiền đề "unlearn
+thay vì retrain"; (2) gần như "học tủ" cho chính metric đánh giá (CosSim đo độ giống F_re;
+Forget-AUC mục tiêu về phía F_re). Phản biện sẽ bắt lỗi. Cần chứng minh phương pháp vẫn tốt
+mà KHÔNG dùng gold model khi train.
+
+**Thay đổi.** (`training/forgetmi_loku.py`) thêm config `distill_teacher`:
+- `"og"` (exp11): retain-distill teacher = **F_og** (model gốc, luôn có sẵn). Tái dùng forward
+  `model_og` đã tính cho UKR/MKR (bắt thêm logits `og_ret_il/og_ret_tl`) → KHÔNG tốn forward
+  thêm, lại bỏ hẳn forward `model_re` khi train. Forget-distill tự tắt (F_og biết forget) →
+  forget xử lý bằng **IHL**. `F_re` chỉ còn dùng để ĐÁNH GIÁ (CosSim) — hợp lệ.
+- `"re"` (mặc định, exp10c): giữ nguyên hành vi cũ (teacher = F_re).
+
+**Config (exp11).** `distill_teacher: "og"`, `distill_forget_weight: 0.0`, `ihl_forget_weight: 1.5`,
+giữ image-FILA (`lora_image_last_k_blocks=1`, `loku_image_subtract_scale=0.3`).
+
+**Notebook.** Cell 4 multi-seed đổi sang `EXP_NAME="exp11_no_fre_ihl"`; Cell 3.5 verify thêm
+`distill_teacher` + check `use_og_teacher`.
+
+**Kiểm chứng.** `py_compile` OK. Khi `teacher='og'`: bỏ qua forward F_re lúc train, dùng
+logits F_og đã có; forget-distill bị vô hiệu an toàn (teach_frg=None, distill_frg_w→0).
+
+---
+
 ## [multi-seed] — 2026-06-02 — Hỗ trợ chạy nhiều seed + tổng hợp mean±std
 
 **Động cơ.** Một lần chạy không đủ tin: MIA_persample dao động ~0.02 giữa các lần, MIA_paper

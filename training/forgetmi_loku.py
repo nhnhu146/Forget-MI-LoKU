@@ -655,6 +655,14 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
     # Triết lý: model_re chưa từng thấy forget → student sẽ bắt chước → forget loss ≈ test loss → MIA thấp
     distill_ret_w = float(getattr(args, 'distill_retain_weight', 0.0))   # KL(student || teacher) trên retain
     distill_frg_w = float(getattr(args, 'distill_forget_weight', 0.0))   # KL trên forget — CHÌA KHÓA
+    # [EXP 11] teacher cho RETAIN distillation: "re" = model retrained (cần retrain, dùng cả ở eval),
+    # "og" = model GỐC (luôn có sẵn, hợp lệ) → bỏ phụ thuộc F_re khi TRAIN. Forget-distill chỉ hợp lý
+    # với "re" (F_og biết forget) → khi teacher="og", forget dùng IHL thay vì distill.
+    distill_teacher = str(getattr(args, 'distill_teacher', 're')).lower()
+    if distill_teacher == 'og' and distill_frg_w > 0:
+        print("⚠️  distill_teacher='og' nhưng distill_forget_weight>0 — F_og BIẾT forget nên "
+              "distill forget sẽ GIỮ forget. Tắt distill_forget (dùng IHL cho forget).")
+        distill_frg_w = 0.0
     # NEW (Exp 09): Inverted Hinge Loss (IHL) — từ paper LoKU
     # L_IHL = 1 + p(true_forget) - max_{v≠true}(p(v))
     # Bounded in [0, 2], self-stopping (giảm tự nhiên khi unlearning đạt) → an toàn hơn NegGrad
@@ -687,13 +695,15 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
 
             # Frozen forward passes (fp16 via autocast)
             need_teacher_distill = distill_ret_w > 0 or distill_frg_w > 0
+            use_og_teacher = (distill_teacher == 'og')
             with torch.no_grad(), torch.autocast(device_type='cuda'):
-                og_ret_i, _, og_ret_t, _ = model_og(**ret_in)[:4]
+                # capture model_og logits too — reused as RETAIN teacher when distill_teacher='og'
+                og_ret_i, og_ret_il, og_ret_t, og_ret_tl = model_og(**ret_in)[:4]
                 og_rnd_i, _, og_rnd_t, _ = model_og(**rnd_in)[:4]
                 if use_re_anchor:
                     re_ret_i, _, re_ret_t, _ = model_re(**ret_in)[:4]
-                # Teacher forward passes for distillation (Exp 07)
-                if need_teacher_distill:
+                # Teacher forward passes for distillation
+                if need_teacher_distill and not use_og_teacher:
                     teach_ret = model_re(**ret_in)[:4]      # (z_img, logits_img, z_txt, logits_txt)
                     teach_frg = model_re(**f_in)[:4]
             og_ret_i = og_ret_i.float(); og_ret_t = og_ret_t.float()
@@ -701,10 +711,16 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
             if use_re_anchor:
                 re_ret_i = re_ret_i.float(); re_ret_t = re_ret_t.float()
             if need_teacher_distill:
-                teach_ret_il = teach_ret[1].float()
-                teach_ret_tl = teach_ret[3].float()
-                teach_frg_il = teach_frg[1].float()
-                teach_frg_tl = teach_frg[3].float()
+                if use_og_teacher:
+                    # [EXP 11] RETAIN teacher = F_og (reuse the og forward above, no extra pass)
+                    teach_ret_il = og_ret_il.float()
+                    teach_ret_tl = og_ret_tl.float()
+                    teach_frg_il = teach_frg_tl = None     # forget-distill disabled with og teacher
+                else:
+                    teach_ret_il = teach_ret[1].float()
+                    teach_ret_tl = teach_ret[3].float()
+                    teach_frg_il = teach_frg[1].float()
+                    teach_frg_tl = teach_frg[3].float()
 
             # Unlearning model forward (trainable) — also capture logits for classification loss
             ul_ret_i, ul_ret_il, ul_ret_t, ul_ret_tl = model_ul(**ret_in)[:4]
