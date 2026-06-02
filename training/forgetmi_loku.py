@@ -815,8 +815,8 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
         wandb.log(log)
         epoch_line = (f"[E{epoch:02d}] loss={avg['Total']:+.3f}  UKR={avg['UKR']:+.3f}  "
                       f"MKR={avg['MKR']:+.3f}  CLS_ret={avg['CLS_ret']:+.3f}  "
-                      f"DSL_ret={avg['DSL_ret']:+.4f}  IHL_frg={avg['IHL_frg']:+.4f}  "
-                      f"| CosSim(ul,re)={cossim:.4f}")
+                      f"DSL_ret={avg['DSL_ret']:+.4f}  DSL_frg={avg['DSL_frg']:+.4f}  "
+                      f"IHL_frg={avg['IHL_frg']:+.4f}  | CosSim(ul,re)={cossim:.4f}")
         print(epoch_line)
         if tracker is not None:
             tracker.log_epoch_line(epoch_line)

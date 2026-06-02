@@ -117,7 +117,11 @@ parameters:
   distill_retain_weight:
     value: 1.5                                            # KL teacher trên RETAIN - giữ utility
   distill_forget_weight:
-    value: 0.0                                            # BỎ - đã chứng minh có hại
+    value: 1.0                                            # [EXP 10c] NHẸ — ép logits forget khớp teacher retrained
+                                                          # (MIA=0). exp10/10b mở conv ảnh -> fit retain tốt -> forget
+                                                          # loss thấp -> MIA tăng 0.61. distill_forget kéo forget về
+                                                          # phân bố "chưa từng thấy" của F_re. exp07 dùng 4.0 (quá mạnh,
+                                                          # chưa có image-PEFT) nên hỏng; giờ 1.0 nhẹ + đúng nhánh ảnh.
   distill_temperature:
     value: 2.0
 
