@@ -528,6 +528,12 @@ def run_mia(model, retain_ds, test_ds, forget_ds, device, args, batch_size=32, s
     rl = per_sample_ce(model, retain_ds, device, args, batch_size)
     tl = per_sample_ce(model, test_ds, device, args, batch_size)
     fl = per_sample_ce(model, forget_ds, device, args, batch_size)
+    # Diagnostic: mean img-CE. MIA thấp "đúng" khi forget ≈ test (như retrained). Nếu
+    # forget >> test → OVER-forgetting (forget bị đẩy quá tay) → MIA thấp nhưng KHÔNG lành mạnh.
+    print(f"  mean img-CE → retain={rl.mean():.3f}  test={tl.mean():.3f}  forget={fl.mean():.3f}")
+    if tl.mean() > 0 and fl.mean() > 1.3 * tl.mean():
+        print(f"  ⚠️  forget-loss ({fl.mean():.3f}) >> test-loss ({tl.mean():.3f}) → OVER-forgetting "
+              f"(IHL/forget-push quá mạnh) → MIA thấp 'giả'. Cân nhắc giảm ihl_forget_weight.")
 
     # ---- (1) per-sample, balanced (current LoKU metric) ----
     rl2, tl2, fl2 = rl.reshape(-1, 1), tl.reshape(-1, 1), fl.reshape(-1, 1)

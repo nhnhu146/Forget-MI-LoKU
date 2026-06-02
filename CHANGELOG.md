@@ -15,6 +15,23 @@
 
 ---
 
+## [exp11b] — 2026-06-02 — Calibrate IHL (over-forgetting) + chẩn đoán mean-loss
+
+**Động cơ.** exp11 (IHL=1.5) cho MIA=0.143/0.333 — quá thấp. Nguyên nhân: IHL ép forget dự đoán
+SAI tự tin → forget CE-loss bị đẩy **vượt cả test** → MIA-SVM xem forget là "non-member" rất mạnh
+→ MIA rơi thấp **một cách giả tạo** (over-forgetting / Streisand), KHÔNG phải khớp retrained
+(retrained MIA≈0 vì forget≈test). Không phải bug (full-retain đã đúng); là IHL quá mạnh.
+
+**Thay đổi.**
+- (`training/forgetmi_loku.py` `run_mia`) thêm chẩn đoán in `mean img-CE` của retain/test/forget +
+  cảnh báo khi `forget > 1.3×test` (dấu hiệu over-forgetting). Giúp nhìn thấy MIA thấp là "thật" hay "giả".
+- (`config.yaml`) `ihl_forget_weight: 1.5 → 0.5` để forget chỉ lên ≈ test.
+- (`run.ipynb`) Cell 4 → `EXP_NAME="exp11b_no_fre_ihl05"`.
+
+**Kiểm chứng.** `py_compile` OK.
+
+---
+
 ## [exp11] — 2026-06-02 — Bỏ phụ thuộc F_re khi train (retain-distill ← F_og + IHL)
 
 **Động cơ.** exp10c đạt số đẹp (thắng paper cả 5 metric qua 3 seed) NHƯNG distill dùng

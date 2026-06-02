@@ -134,7 +134,9 @@ parameters:
   # [EXP 11] BẬT IHL làm tín hiệu forget (bounded, KHÔNG cần teacher F_re) thay cho
   # distill_forget. Đẩy forget loss lên kiểu self-stopping → ghìm MIA mà không lệ thuộc gold.
   ihl_forget_weight:
-    value: 1.5                                            # [EXP 11] on — forget push không cần F_re
+    value: 0.5                                            # [EXP 11b] IHL=1.5 đẩy forget QUÁ tay (forget-loss >> test
+                                                          # → MIA 0.143 "giả"/over-forget). Hạ 0.5 để forget chỉ lên ≈ test
+                                                          # → MIA về gần retrained tự nhiên. Ablate 0.3/0.5/0.75.
 
   # ===== Forget-margin (bounded loss) =====
   forget_margin:
