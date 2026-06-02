@@ -74,6 +74,8 @@ parameters:
     value: 16
   eval_max_retain:
     value: 512                                            # cap retain forwards in MIA+CosSim (0 = full/old behavior)
+  mia_paper_batch_size:
+    value: 32                                             # nhóm loss theo batch cho MIA_paper (giống eval_unlearning.py gốc)
   num_cpu_workers:
     value: 2
 

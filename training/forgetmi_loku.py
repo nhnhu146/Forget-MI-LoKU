@@ -500,27 +500,56 @@ def per_sample_ce(model, dataset, device, args, batch_size=32):
     return np.concatenate(out)
 
 
+def _batch_means(losses_1d, bs):
+    """Group a 1-D loss array (DataLoader order) into chunks of size bs and mean each
+    chunk — reproduces the per-BATCH mean loss used by the original Forget-MI eval."""
+    bs = max(1, int(bs))
+    return np.array([losses_1d[i:i + bs].mean()
+                     for i in range(0, len(losses_1d), bs)])
+
+
 def run_mia(model, retain_ds, test_ds, forget_ds, device, args, batch_size=32, seed=42,
-            max_retain=0):
-    """SVM-based MIA. Returns fraction of forget predicted as 'member' (label=1).
-    The retain set is subsampled to max_retain BEFORE forwarding because the SVM is
-    balanced down to len(test) anyway — forwarding all 5409 retain samples just to
-    discard ~90% was the main eval bottleneck."""
+            max_retain=0, paper_batch_size=32):
+    """Compute TWO membership-inference metrics from ONE pass of per-sample losses
+    (returns a dict). The retain set is subsampled to max_retain before forwarding.
+
+      'persample' — LoKU metric (current): SVM on per-SAMPLE img-CE losses, retain/test
+                    balanced 1:1. Finer (uses all 201 forget samples).
+      'paper'     — replicates evaluation/eval_unlearning.py (the original Forget-MI MIA):
+                    per-BATCH MEAN loss, UNbalanced retain+test, SVC(C=3, rbf, gamma=auto).
+                    Lets results be compared to the paper's MIA methodology.
+    Both = fraction of forget predicted as 'member' (label 1)."""
     from sklearn.svm import SVC
     print("  computing per-sample losses...")
     retain_ds = _subsample_dataset(retain_ds, max_retain, seed)
-    rl = per_sample_ce(model, retain_ds, device, args, batch_size).reshape(-1, 1)
-    tl = per_sample_ce(model, test_ds, device, args, batch_size).reshape(-1, 1)
-    fl = per_sample_ce(model, forget_ds, device, args, batch_size).reshape(-1, 1)
-    n = min(len(rl), len(tl))
+    rl = per_sample_ce(model, retain_ds, device, args, batch_size)
+    tl = per_sample_ce(model, test_ds, device, args, batch_size)
+    fl = per_sample_ce(model, forget_ds, device, args, batch_size)
+
+    # ---- (1) per-sample, balanced (current LoKU metric) ----
+    rl2, tl2, fl2 = rl.reshape(-1, 1), tl.reshape(-1, 1), fl.reshape(-1, 1)
+    n = min(len(rl2), len(tl2))
     rng = np.random.default_rng(seed)
-    r_sub = rl[rng.choice(len(rl), n, replace=False)]
-    t_sub = tl[rng.choice(len(tl), n, replace=False)]
-    X = np.vstack([r_sub, t_sub])
-    y = np.concatenate([np.ones(n), np.zeros(n)])
+    r_sub = rl2[rng.choice(len(rl2), n, replace=False)]
+    t_sub = tl2[rng.choice(len(tl2), n, replace=False)]
     clf = SVC(C=3, kernel='rbf', gamma='auto', random_state=seed)
-    clf.fit(X, y)
-    return float(clf.predict(fl).mean())
+    clf.fit(np.vstack([r_sub, t_sub]), np.concatenate([np.ones(n), np.zeros(n)]))
+    mia_persample = float(clf.predict(fl2).mean())
+
+    # ---- (2) paper-style: per-batch-mean, unbalanced (eval_unlearning.py) ----
+    try:
+        rb = _batch_means(rl, paper_batch_size).reshape(-1, 1)
+        tb = _batch_means(tl, paper_batch_size).reshape(-1, 1)
+        fb = _batch_means(fl, paper_batch_size).reshape(-1, 1)
+        clf2 = SVC(C=3, kernel='rbf', gamma='auto')
+        clf2.fit(np.vstack([rb, tb]),
+                 np.concatenate([np.ones(len(rb)), np.zeros(len(tb))]))
+        mia_paper = float(clf2.predict(fb).mean())
+    except Exception as e:
+        print(f"   [MIA paper-style warn] {e}")
+        mia_paper = float('nan')
+
+    return {'persample': mia_persample, 'paper': mia_paper}
 
 
 @torch.no_grad()
@@ -1053,12 +1082,15 @@ def main():
 
     # Wrap MIA + perf eval in try/except so a single failure doesn't lose everything
     try:
-        print("🛡️  Computing MIA score...")
-        mia = run_mia(merged, datasets['retain'], datasets['test'], datasets['forget'],
-                      device, config, batch_size=config.eval_batch_size,
-                      seed=int(config.random_seed), max_retain=eval_max_retain)
+        print("🛡️  Computing MIA scores (per-sample + paper-style)...")
+        mia_res = run_mia(merged, datasets['retain'], datasets['test'], datasets['forget'],
+                          device, config, batch_size=config.eval_batch_size,
+                          seed=int(config.random_seed), max_retain=eval_max_retain,
+                          paper_batch_size=int(getattr(config, 'mia_paper_batch_size', 32)))
+        mia = mia_res['persample']          # keep 'mia' = per-sample (existing metric/key)
+        mia_paper = mia_res['paper']
     except Exception as e:
-        print(f"⚠️  MIA failed: {e}"); mia = float('nan')
+        print(f"⚠️  MIA failed: {e}"); mia = float('nan'); mia_paper = float('nan')
 
     try:
         print("📐 Computing CosSim vs retrained model...")
@@ -1090,7 +1122,8 @@ def main():
 
     results = {
         # ---- main metrics (compare to Forget-MI paper Table 1) ----
-        'final/MIA':         round(mia, 3),
+        'final/MIA':         round(mia, 3),          # per-sample SVM (LoKU metric)
+        'final/MIA_paper':   round(mia_paper, 3),    # per-batch-mean SVM (eval_unlearning.py style)
         'final/Df_AUC':      round(forget_m['AUC'], 3),
         'final/Df_F1':       round(forget_m['Macro_F1'], 3),
         'final/Dt_AUC':      round(test_m['AUC'], 3),
@@ -1109,7 +1142,8 @@ def main():
     print("\n" + "─" * 60)
     print(" METRIC                    | VALUE   | PAPER TARGET ")
     print("─" * 60)
-    print(f"  MIA           (↓)        | {mia:.3f}  | 0.571 (3%) / 0.615 (6%) / 0.810 (10%)")
+    print(f"  MIA_persample (↓)        | {mia:.3f}  | (LoKU per-sample SVM)")
+    print(f"  MIA_paper     (↓)        | {mia_paper:.3f}  | 0.571 (3%) / 0.615 (6%) / 0.810 (10%)  ← so với paper")
     print(f"  Forget AUC    (↓)        | {forget_m['AUC']:.3f}  | 0.735 (3%) / 0.654 (6%) / 0.656 (10%)")
     print(f"  Forget Mac-F1 (↓)        | {forget_m['Macro_F1']:.3f}  | 0.393 (3%) / 0.328 (6%) / 0.313 (10%)")
     print(f"  Test AUC      (↑)        | {test_m['AUC']:.3f}  | 0.625 (3%) / 0.599 (6%) / 0.565 (10%)")
@@ -1140,6 +1174,7 @@ def main():
     if tracker is not None:
         tracker_results = {
             'MIA':            float(mia) if mia == mia else float('nan'),
+            'MIA_paper':      float(mia_paper) if mia_paper == mia_paper else float('nan'),
             'Df_AUC':         float(forget_m['AUC']),
             'Df_F1':          float(forget_m['Macro_F1']),
             'Dt_AUC':         float(test_m['AUC']),

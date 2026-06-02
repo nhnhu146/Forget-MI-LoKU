@@ -15,6 +15,28 @@
 
 ---
 
+## [dual-mia] — 2026-06-02 — Thêm MIA_paper (cách tính gốc) bên cạnh MIA_persample
+
+**Động cơ.** MIA của LoKU dùng loss **per-sample** (`per_sample_ce`), còn MIA gốc của
+Forget-MI (`evaluation/eval_unlearning.py`) dùng loss **trung bình mỗi BATCH** rồi mới đưa
+vào SVM. Hai cách khác nhau → so "MIA vs paper" không apples-to-apples. Cần BỔ SUNG (không
+thay thế) một MIA tính đúng kiểu paper để so sánh chuẩn.
+
+**Thay đổi.** (`training/forgetmi_loku.py`) `run_mia` giờ trả về dict 2 giá trị, tính từ
+CÙNG một lượt forward (không tốn thêm GPU):
+- `persample` — giữ nguyên metric cũ (SVM trên per-sample, balanced retain/test).
+- `paper` — gom per-sample loss theo chunk `mia_paper_batch_size` (mặc định 32) qua helper
+  `_batch_means`, rồi chạy SVC(C=3, rbf, gamma=auto), retain+test KHÔNG cân bằng — y hệt
+  `eval_unlearning.py`. In ra bảng kết quả 2 dòng: `MIA_persample` và `MIA_paper`.
+- Log `final/MIA` (giữ key cũ) + `final/MIA_paper`; thêm vào CSV + bảng MD (exp_tracker.py).
+
+**Config.** thêm `mia_paper_batch_size: 32` (khớp default của eval gốc).
+
+**Kiểm chứng.** `py_compile` OK (cả exp_tracker.py); `_batch_means(201, 32)` → 7 batch-mean
+đúng, chunk-mean ≡ per-batch CE mean. MIA_persample giữ nguyên công thức cũ.
+
+---
+
 ## [eval-speedup] — 2026-06-02 — Tăng tốc bước evaluation ~6–10×
 
 **Động cơ.** Train rất nhanh (vòng lặp `zip(forget, rand, retain)` dừng ở forget ~201 mẫu →

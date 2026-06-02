@@ -187,7 +187,8 @@ class ExpTracker:
         metrics_tbl = (
             "| Metric | Value | Δ vs Paper (3%) |\n"
             "|---|---|---|\n"
-            f"| MIA ↓ | **{fmt('MIA')}** | {_delta(results.get('MIA'), 0.571)} |\n"
+            f"| MIA_persample ↓ | **{fmt('MIA')}** | (LoKU per-sample SVM) |\n"
+            f"| MIA_paper ↓ | **{fmt('MIA_paper')}** | {_delta(results.get('MIA_paper'), 0.571)} |\n"
             f"| Forget AUC ↓ | **{fmt('Df_AUC')}** | {_delta(results.get('Df_AUC'), 0.735)} |\n"
             f"| Forget F1 ↓ | **{fmt('Df_F1')}** | {_delta(results.get('Df_F1'), 0.393)} |\n"
             f"| Test AUC ↑ | **{fmt('Dt_AUC')}** | {_delta(results.get('Dt_AUC'), 0.625, higher=True)} |\n"
