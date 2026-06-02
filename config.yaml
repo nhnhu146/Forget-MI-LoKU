@@ -152,7 +152,8 @@ parameters:
   lora_image_include_fc1:
     value: false                                          # true → FILA cả image classifier head (rank-clamped)
   loku_image_subtract_scale:
-    value: 0.5                                            # gentler than text (conv+BN nhạy hơn). Ablate 0.3/0.5/1.0
+    value: 0.3                                            # [EXP 10b] 0.5 đẩy forget tốt nhưng MIA tăng 0.562→0.612;
+                                                          # hạ 0.3 để giữ Forget-AUC thấp mà MIA bớt tăng. Ablate 0.3/0.5/0.7
 
   # ===== Fisher Information =====
   fisher_max_samples:
