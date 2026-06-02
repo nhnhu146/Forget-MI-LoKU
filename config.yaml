@@ -72,6 +72,8 @@ parameters:
     value: 16
   eval_batch_size:
     value: 16
+  eval_max_retain:
+    value: 512                                            # cap retain forwards in MIA+CosSim (0 = full/old behavior)
   num_cpu_workers:
     value: 2
 

@@ -467,6 +467,22 @@ def load_ckpt(out_dir, model, gates, optimizer):
 # Evaluation (MIA + CosSim + AUC + F1)
 # ============================================================================
 
+def _eval_autocast():
+    """fp16 autocast for eval forwards (≈2× faster than fp32, metrics unchanged)."""
+    return torch.autocast(device_type='cuda', enabled=torch.cuda.is_available())
+
+
+def _subsample_dataset(dataset, max_n, seed=42):
+    """Return a random Subset of size max_n (deterministic). max_n<=0 → full dataset.
+    Used to cap the (large) retain set during eval — MIA balances down to len(test)
+    anyway, and CosSim/AUC on ~500 samples ≈ full set, so forwarding all 5409 is waste."""
+    if not max_n or max_n <= 0 or len(dataset) <= max_n:
+        return dataset
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(dataset), int(max_n), replace=False)
+    return Subset(dataset, idx.tolist())
+
+
 @torch.no_grad()
 def per_sample_ce(model, dataset, device, args, batch_size=32):
     """Per-sample cross-entropy on img_logits (for MIA)."""
@@ -476,17 +492,23 @@ def per_sample_ce(model, dataset, device, args, batch_size=32):
     for batch in loader:
         batch = tuple(t.to(device, non_blocking=True) if torch.is_tensor(t) else t for t in batch)
         inputs, labels, _ = get_model_inputs(args, batch, device)
-        outputs = safe_forward(model, inputs)
+        with _eval_autocast():
+            outputs = safe_forward(model, inputs)
         logits = outputs[1].float()
         losses = F.cross_entropy(logits, labels.long().view(-1), reduction='none')
         out.append(losses.cpu().numpy())
     return np.concatenate(out)
 
 
-def run_mia(model, retain_ds, test_ds, forget_ds, device, args, batch_size=32, seed=42):
-    """SVM-based MIA. Returns fraction of forget predicted as 'member' (label=1)."""
+def run_mia(model, retain_ds, test_ds, forget_ds, device, args, batch_size=32, seed=42,
+            max_retain=0):
+    """SVM-based MIA. Returns fraction of forget predicted as 'member' (label=1).
+    The retain set is subsampled to max_retain BEFORE forwarding because the SVM is
+    balanced down to len(test) anyway — forwarding all 5409 retain samples just to
+    discard ~90% was the main eval bottleneck."""
     from sklearn.svm import SVC
     print("  computing per-sample losses...")
+    retain_ds = _subsample_dataset(retain_ds, max_retain, seed)
     rl = per_sample_ce(model, retain_ds, device, args, batch_size).reshape(-1, 1)
     tl = per_sample_ce(model, test_ds, device, args, batch_size).reshape(-1, 1)
     fl = per_sample_ce(model, forget_ds, device, args, batch_size).reshape(-1, 1)
@@ -511,8 +533,9 @@ def cosine_sim_models(model_a, model_b, dataset, device, args, batch_size=32):
     for batch in loader:
         batch = tuple(t.to(device, non_blocking=True) if torch.is_tensor(t) else t for t in batch)
         inputs, _, _ = get_model_inputs(args, batch, device)
-        la = safe_forward(model_a, inputs)[1].float()
-        lb = safe_forward(model_b, inputs)[1].float()
+        with _eval_autocast():
+            la = safe_forward(model_a, inputs)[1].float()
+            lb = safe_forward(model_b, inputs)[1].float()
         sims.append(F.cosine_similarity(la, lb, dim=1).cpu().numpy())
     return float(np.concatenate(sims).mean())
 
@@ -532,7 +555,8 @@ def perf_metrics(model, dataset, device, args, batch_size=32, num_classes=4):
         inputs, label_raw, _ = get_model_inputs(args, batch, device)
         # batch structure: image[0], label_raw[1], txt_ids[2], txt_mask[3], txt_seg[4], label_onehot[5], report_id[6]
         label_oh = batch[5]
-        outputs = safe_forward(model, inputs)
+        with _eval_autocast():
+            outputs = safe_forward(model, inputs)
         all_logits.append(outputs[1].float().cpu().numpy())
         # Ensure one-hot [N, num_classes]
         oh_np = label_oh.cpu().numpy()
@@ -1022,18 +1046,25 @@ def main():
         p.requires_grad = False
     torch.cuda.empty_cache()
 
+    # Cap retain forwards during eval (0 = full, for exact reproducibility of old runs)
+    eval_max_retain = int(getattr(config, 'eval_max_retain', 512))
+    if eval_max_retain and eval_max_retain > 0:
+        print(f"⚡ eval_max_retain={eval_max_retain} (subsample retain for MIA + CosSim)")
+
     # Wrap MIA + perf eval in try/except so a single failure doesn't lose everything
     try:
         print("🛡️  Computing MIA score...")
         mia = run_mia(merged, datasets['retain'], datasets['test'], datasets['forget'],
                       device, config, batch_size=config.eval_batch_size,
-                      seed=int(config.random_seed))
+                      seed=int(config.random_seed), max_retain=eval_max_retain)
     except Exception as e:
         print(f"⚠️  MIA failed: {e}"); mia = float('nan')
 
     try:
         print("📐 Computing CosSim vs retrained model...")
-        cossim_re = cosine_sim_models(merged, model_re, datasets['retain'], device,
+        cossim_ds = _subsample_dataset(datasets['retain'], eval_max_retain,
+                                       int(config.random_seed))
+        cossim_re = cosine_sim_models(merged, model_re, cossim_ds, device,
                                       config, batch_size=config.eval_batch_size)
     except Exception as e:
         print(f"⚠️  CosSim failed: {e}"); cossim_re = float('nan')

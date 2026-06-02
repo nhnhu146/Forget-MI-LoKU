@@ -15,6 +15,27 @@
 
 ---
 
+## [eval-speedup] — 2026-06-02 — Tăng tốc bước evaluation ~6–10×
+
+**Động cơ.** Train rất nhanh (vòng lặp `zip(forget, rand, retain)` dừng ở forget ~201 mẫu →
+chỉ ~13 batch/epoch) nhưng eval lại chậm vì duyệt TOÀN BỘ retain (5409) tới 3 lần, ở fp32.
+Hai chỗ lãng phí thật sự: (1) MIA forward cả 5409 retain rồi chỉ giữ ~531 (cân bằng theo
+len(test)); (2) CosSim chạy full retain × 2 model.
+
+**Thay đổi.** (`training/forgetmi_loku.py`)
+- Thêm `_eval_autocast()` (fp16) và bọc quanh forward trong `per_sample_ce`,
+  `cosine_sim_models`, `perf_metrics` → mỗi forward nhanh ~2×.
+- Thêm `_subsample_dataset(dataset, max_n, seed)`; `run_mia` nhận `max_retain` và subsample
+  retain TRƯỚC khi forward; CosSim cũng dùng retain đã subsample trong `run()`.
+
+**Config.** (`config.yaml`) thêm `eval_max_retain: 512` (0 = full/giữ hành vi cũ để lặp lại
+kết quả cũ khi cần).
+
+**Kiểm chứng.** `py_compile` OK. Metric gần như không đổi: MIA vốn chỉ dùng ~531 mẫu;
+CosSim/AUC trên ~512 mẫu ≈ trên 5409 (sai số rất nhỏ). Thuần tối ưu tốc độ, không đụng logic unlearning.
+
+---
+
 ## [exp10] — 2026-06-01 — Modality-aware PEFT: FILA subtraction lên nhánh ẢNH
 
 **Động cơ.** Chẩn đoán từ kết quả exp01–09: MIA (`evaluation/eval_unlearning.py`,
