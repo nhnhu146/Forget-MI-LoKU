@@ -558,7 +558,8 @@ def run_mia(model, retain_ds, test_ds, forget_ds, device, args, batch_size=32, s
         print(f"   [MIA paper-style warn] {e}")
         mia_paper = float('nan')
 
-    return {'persample': mia_persample, 'paper': mia_paper}
+    return {'persample': mia_persample, 'paper': mia_paper,
+            'retain_ce': float(rl.mean()), 'test_ce': float(tl.mean()), 'forget_ce': float(fl.mean())}
 
 
 @torch.no_grad()
@@ -923,6 +924,8 @@ def main():
                     help="One-line hypothesis for the experiment (auto-fill section 1)")
     ap.add_argument("--seed", type=int, default=None,
                     help="Override config.random_seed (for multi-seed runs)")
+    ap.add_argument("--override", type=str, default=None,
+                    help="Comma-separated key=value config overrides, e.g. 'ihl_forget_weight=0.75'")
     cli = ap.parse_args()
 
     # ----- Optional experiment tracker -----
@@ -948,6 +951,21 @@ def main():
     if cli.seed is not None:                       # multi-seed override (before wandb.init)
         cfg['random_seed'] = int(cli.seed)
         print(f"🎲 Seed override: random_seed = {cli.seed}")
+
+    if cli.override:                               # generic config overrides (for sweeps)
+        for kv in cli.override.split(','):
+            if '=' not in kv:
+                continue
+            k, v = kv.split('=', 1); k = k.strip(); v = v.strip()
+            try:
+                v2 = int(v)
+            except ValueError:
+                try:
+                    v2 = float(v)
+                except ValueError:
+                    v2 = v
+            cfg[k] = v2
+            print(f"🔧 Override: {k} = {v2}")
 
     wandb.init(project=cfg.get('project', 'forget_exp'),
                entity=cfg.get('entity', None),
@@ -1121,8 +1139,12 @@ def main():
                           paper_batch_size=int(getattr(config, 'mia_paper_batch_size', 32)))
         mia = mia_res['persample']          # keep 'mia' = per-sample (existing metric/key)
         mia_paper = mia_res['paper']
+        forget_ce = mia_res.get('forget_ce', float('nan'))
+        test_ce = mia_res.get('test_ce', float('nan'))
     except Exception as e:
-        print(f"⚠️  MIA failed: {e}"); mia = float('nan'); mia_paper = float('nan')
+        print(f"⚠️  MIA failed: {e}")
+        mia = float('nan'); mia_paper = float('nan')
+        forget_ce = test_ce = float('nan')
 
     try:
         print("📐 Computing CosSim vs retrained model...")
@@ -1156,6 +1178,8 @@ def main():
         # ---- main metrics (compare to Forget-MI paper Table 1) ----
         'final/MIA':         round(mia, 3),          # per-sample SVM (LoKU metric)
         'final/MIA_paper':   round(mia_paper, 3),    # per-batch-mean SVM (eval_unlearning.py style)
+        'final/forget_ce':   round(forget_ce, 3),    # mean img-CE forget (≈ test_ce = lành mạnh)
+        'final/test_ce':     round(test_ce, 3),      # mean img-CE test (mốc tham chiếu)
         'final/Df_AUC':      round(forget_m['AUC'], 3),
         'final/Df_F1':       round(forget_m['Macro_F1'], 3),
         'final/Dt_AUC':      round(test_m['AUC'], 3),
@@ -1193,6 +1217,8 @@ def main():
            'forget_pct': os.path.basename(config.forget_set_path),
            'seed': int(config.random_seed),
            'lora_r': int(config.lora_r),
+           'ihl': float(getattr(config, 'ihl_forget_weight', 0.0)),
+           'img_subtract': float(getattr(config, 'loku_image_subtract_scale', 0.0)),
            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     new_file = not os.path.exists(csv_path)
     with open(csv_path, 'a', newline='') as f:

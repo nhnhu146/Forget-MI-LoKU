@@ -15,6 +15,23 @@
 
 ---
 
+## [exp11c] — 2026-06-02 — Cơ chế override config + sweep IHL tìm sweet-spot
+
+**Động cơ.** exp11b (IHL=0.5) cho forget_ce(1.57) < test_ce(1.74) → còn dư địa đẩy forget mạnh
+hơn (Forget-AUC ↓) mà chưa over-forget. Cần sweep IHL để tìm điểm tối ưu, không sửa tay nhiều lần.
+
+**Thay đổi.**
+- (`training/forgetmi_loku.py`) thêm cờ tổng quát `--override "k=v,k2=v2"` patch `cfg` trước
+  `wandb.init` (coerce int/float/str) → sweep bất kỳ tham số nào không cần sửa config.yaml.
+- `run_mia` trả thêm `retain_ce/test_ce/forget_ce`; results + CSV thêm `final/forget_ce`,
+  `final/test_ce`, và cột `ihl`, `img_subtract` → bảng sweep map theo IHL & thấy forget-vs-test.
+- (`run.ipynb`) Cell 4 → **sweep IHL {0.5,0.75,1.0}** (single seed 42), in bảng forget_ce/test_ce
+  + cờ over-forget, ghi `experiments/exp11c_ihl_sweep_summary.md`.
+
+**Kiểm chứng.** `py_compile` OK.
+
+---
+
 ## [exp11b] — 2026-06-02 — Calibrate IHL (over-forgetting) + chẩn đoán mean-loss
 
 **Động cơ.** exp11 (IHL=1.5) cho MIA=0.143/0.333 — quá thấp. Nguyên nhân: IHL ép forget dự đoán
