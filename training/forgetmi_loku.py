@@ -899,6 +899,8 @@ def main():
                     help="Experiment short name → auto-track to experiments/exp_NNN_<name>.md")
     ap.add_argument("--hypothesis", type=str, default=None,
                     help="One-line hypothesis for the experiment (auto-fill section 1)")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Override config.random_seed (for multi-seed runs)")
     cli = ap.parse_args()
 
     # ----- Optional experiment tracker -----
@@ -920,6 +922,10 @@ def main():
                for k, v in raw['parameters'].items()}
     else:
         cfg = raw
+
+    if cli.seed is not None:                       # multi-seed override (before wandb.init)
+        cfg['random_seed'] = int(cli.seed)
+        print(f"🎲 Seed override: random_seed = {cli.seed}")
 
     wandb.init(project=cfg.get('project', 'forget_exp'),
                entity=cfg.get('entity', None),

@@ -15,7 +15,20 @@
 
 ---
 
-## [dual-mia] — 2026-06-02 — Thêm MIA_paper (cách tính gốc) bên cạnh MIA_persample
+## [multi-seed] — 2026-06-02 — Hỗ trợ chạy nhiều seed + tổng hợp mean±std
+
+**Động cơ.** Một lần chạy không đủ tin: MIA_persample dao động ~0.02 giữa các lần, MIA_paper
+lượng tử hóa ~1/7. Cần chạy nhiều seed và báo cáo mean±std cho luận văn.
+
+**Thay đổi.**
+- (`training/forgetmi_loku.py`) thêm cờ `--seed` override `config.random_seed` (đặt trước
+  `wandb.init`). Data split vẫn cố định (random.seed(0)/random_state=42) nên forget/retain/test
+  KHÔNG đổi giữa các seed — chỉ phần ngẫu nhiên huấn luyện/đánh giá đổi (đúng tinh thần).
+- (`run.ipynb` Cell 4) chuyển sang vòng lặp multi-seed [42,123,7]: mỗi seed train+eval đầy đủ
+  (`--fresh --seed`), tự đọc `results_summary.csv` tính mean±std, in bảng và ghi
+  `experiments/<exp>_multiseed_summary.md` (Cell 5 push). Mỗi seed vẫn auto-track riêng.
+
+**Kiểm chứng.** `py_compile` OK.
 
 **Động cơ.** MIA của LoKU dùng loss **per-sample** (`per_sample_ce`), còn MIA gốc của
 Forget-MI (`evaluation/eval_unlearning.py`) dùng loss **trung bình mỗi BATCH** rồi mới đưa
