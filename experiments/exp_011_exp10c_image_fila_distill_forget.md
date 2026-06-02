@@ -285,7 +285,8 @@ python training/forgetmi_loku.py --config config.yaml --fresh --exp exp10c_image
 <!-- AUTO:metrics -->
 | Metric | Value | Δ vs Paper (3%) |
 |---|---|---|
-| MIA ↓ | **0.473** | -0.098 ✅ |
+| MIA_persample ↓ | **0.493** | (LoKU per-sample SVM) |
+| MIA_paper ↓ | **0.571** | +0.000 ❌ |
 | Forget AUC ↓ | **0.718** | -0.017 ✅ |
 | Forget F1 ↓ | **0.271** | -0.122 ✅ |
 | Test AUC ↑ | **0.689** | +0.064 ✅ |
