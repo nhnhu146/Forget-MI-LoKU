@@ -31,6 +31,9 @@ Sắp xếp theo thứ tự thời gian (mới nhất ở dưới). Auto-tracker
 | 013 | exp10c_image_fila_distill_forget_seed123 | 2026-06-02 | 🔄 | 0.473 | 0.700 | 0.307 | 0.673 | 0.317 | 0.184 | 0.451% | _(auto, cần kết luận)_ |
 | 014 | exp10c_image_fila_distill_forget_seed7 | 2026-06-02 | 🔄 | 0.403 | 0.686 | 0.273 | 0.675 | 0.348 | 0.185 | 0.451% | _(auto, cần kết luận)_ |
 | 015 | exp11_no_fre_ihl | 2026-06-02 | 🔄 | 0.333 | 0.687 | 0.308 | 0.673 | 0.380 | 0.179 | 0.451% | _(auto, cần kết luận)_ |
+| 016 | exp11c_ihl_sweep_ihl050 | 2026-06-03 | 🔄 | 0.507 | 0.758 | 0.470 | 0.679 | 0.368 | 0.170 | 0.451% | _(auto, cần kết luận)_ |
+| 017 | exp11c_ihl_sweep_ihl075 | 2026-06-03 | 🔄 | 0.453 | 0.734 | 0.379 | 0.677 | 0.363 | 0.173 | 0.451% | _(auto, cần kết luận)_ |
+| 018 | exp11c_ihl_sweep_ihl100 | 2026-06-03 | 🔄 | 0.483 | 0.767 | 0.456 | 0.681 | 0.352 | 0.110 | 0.451% | _(auto, cần kết luận)_ |
 
 **Reference (paper Forget-MI, 3%)**: MIA=0.571 | Df_AUC=0.735 | Df_F1=0.393 | Dt_AUC=0.625 | Dt_F1=0.250 | Time=5h | Trainable=100%
 
