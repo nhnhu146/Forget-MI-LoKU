@@ -989,6 +989,14 @@ def main():
     config = wandb.config
     set_seed(config.random_seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        print(f"🟢 GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        print("🔴 CẢNH BÁO: KHÔNG có GPU — đang chạy CPU. Mỗi exp sẽ chậm ~25-30× (Fisher ~12 phút,"
+              " train gần như TREO ở Epoch 0). Hãy bật GPU: Colab → Runtime → Change runtime type → GPU,"
+              " rồi chạy lại. (Set env FORGETMI_ALLOW_CPU=1 nếu THỰC SỰ muốn chạy CPU.)")
+        if os.environ.get("FORGETMI_ALLOW_CPU") != "1":
+            raise SystemExit("Dừng để tránh treo trên CPU. Bật GPU hoặc đặt FORGETMI_ALLOW_CPU=1.")
 
     out_dir = config.output_dir
     os.makedirs(out_dir, exist_ok=True)
