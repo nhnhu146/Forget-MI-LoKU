@@ -676,8 +676,13 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
     ihl_forget_w = float(getattr(args, 'ihl_forget_weight', 0.0))
     eval_subset = Subset(datasets['retain'],
                          list(range(min(200, len(datasets['retain'])))))
+    # [EXP 11] Early-stop monitor. 'val' (HONEST default): validation loss, KHÔNG đụng F_re.
+    # 'cossim': độ giống F_re (gold) — chỉ hợp lệ khi cho phép dùng F_re (exp10c). 'none': cố định epoch.
+    early_stop_metric = str(getattr(args, 'early_stop_metric', 'val')).lower()
+    val_subset = Subset(datasets['validation'],
+                        list(range(min(400, len(datasets['validation'])))))
 
-    best_cossim = -1.0; patience = 0
+    best_score = -1e9; patience = 0
     margin_ukr = margin_mkr = None
     train_start = time.time()
 
@@ -862,29 +867,40 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
 
         avg = {k: v / max(steps, 1) for k, v in agg.items()}
 
-        # Eval: CosSim model_ul vs model_re on retain subset
-        cossim = cosine_sim_models(model_ul, model_re, eval_subset, device, args,
-                                   batch_size=args.eval_batch_size)
-        log = {'epoch': epoch, 'cossim_vs_re': cossim,
-               **{f'loss/{k}': v for k, v in avg.items()}}
+        # ----- Early-stop monitor -----
+        if early_stop_metric == 'cossim':
+            # ⚠️ Uses F_re (gold/eval model) DURING training — only legitimate for the
+            #    F_re-allowed variant (exp10c). NOT honest for the "no F_re" variant.
+            monitor = cosine_sim_models(model_ul, model_re, eval_subset, device, args,
+                                        batch_size=args.eval_batch_size)
+            score = monitor; mon_str = f"CosSim(ul,re)={monitor:.4f}"
+        elif early_stop_metric == 'none':
+            score = None; mon_str = "(fixed epochs)"
+        else:  # 'val' (HONEST): validation mean img-CE — NO F_re. Lower=better → score=-val_ce
+            val_ce = float(per_sample_ce(model_ul, val_subset, device, args,
+                                         args.eval_batch_size).mean())
+            score = -val_ce; mon_str = f"val_CE={val_ce:.4f}"
+
+        log = {'epoch': epoch, **{f'loss/{k}': v for k, v in avg.items()}}
         wandb.log(log)
         epoch_line = (f"[E{epoch:02d}] loss={avg['Total']:+.3f}  UKR={avg['UKR']:+.3f}  "
                       f"MKR={avg['MKR']:+.3f}  CLS_ret={avg['CLS_ret']:+.3f}  "
                       f"DSL_ret={avg['DSL_ret']:+.4f}  DSL_frg={avg['DSL_frg']:+.4f}  "
-                      f"IHL_frg={avg['IHL_frg']:+.4f}  | CosSim(ul,re)={cossim:.4f}")
+                      f"IHL_frg={avg['IHL_frg']:+.4f}  | {mon_str}")
         print(epoch_line)
         if tracker is not None:
             tracker.log_epoch_line(epoch_line)
         save_ckpt(out_dir, epoch, model_ul, gates, optimizer, avg)
 
-        # Early stopping on CosSim (higher = better)
-        if cossim > best_cossim + 1e-4:
-            best_cossim = cossim; patience = 0
-        else:
-            patience += 1
-            if patience >= int(getattr(args, 'early_stop_patience', 4)):
-                print(f"⏹  Early stop at epoch {epoch} (best CosSim={best_cossim:.4f})")
-                break
+        # Early stopping (higher score = better). 'none' → run all epochs.
+        if score is not None:
+            if score > best_score + 1e-4:
+                best_score = score; patience = 0
+            else:
+                patience += 1
+                if patience >= int(getattr(args, 'early_stop_patience', 4)):
+                    print(f"⏹  Early stop at epoch {epoch} ({early_stop_metric}, best={best_score:.4f})")
+                    break
 
     elapsed_h = (time.time() - train_start) / 3600.0
     return elapsed_h

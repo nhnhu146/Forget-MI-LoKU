@@ -15,6 +15,33 @@
 
 ---
 
+## [integrity-fix] — 2026-06-02 — GỠ KỸ XẢO: early-stop không được dùng F_re
+
+**Vấn đề (nghiêm trọng).** Vòng train dừng sớm dựa trên `CosSim(model_ul, model_re)` — độ giống
+với **model retrained (F_re = gold/eval reference)** — và giữ checkpoint có CosSim cao nhất. Đây là
+KỸ XẢO: (1) dùng `F_re` NGAY TRONG lúc train (mâu thuẫn tuyên bố "exp11 không dùng F_re"); (2)
+`1−CosSim` là metric báo cáo → early-stop theo nó = "học tủ" vào metric. Tồn tại từ exp08.
+
+**Thay đổi.** (`training/forgetmi_loku.py`) thêm `early_stop_metric`:
+- `"val"` (HONEST, mặc định): dừng theo mean img-CE trên tập **validation** (held-out, KHÔNG đụng
+  F_re). Mode này KHÔNG forward F_re lúc train.
+- `"cossim"`: hành vi cũ (dùng F_re) — CHỈ hợp lệ cho biến thể cho phép F_re (exp10c).
+- `"none"`: chạy đủ epoch, không chọn.
+Đổi `best_cossim`→`best_score`; log `val_CE` thay vì CosSim ở mode honest.
+
+**Config.** `early_stop_metric: "val"`; `ihl_forget_weight: 0.75` (sweet-spot). Audit các chỗ khác:
+`distill_teacher=og`, `distill_forget=0`, `eta_re_anchor=0`, Fisher dùng forget+retain (hợp lệ),
+margin tự tính từ model → **sạch**. Sau fix, `F_re` chỉ còn ở EVAL (CosSim) — hợp lệ.
+
+**Notebook.** Cell 3.5 thêm INTEGRITY CHECK; Cell 4 → exp11d re-run sạch; header nêu 2 biến thể.
+
+**Lưu ý.** Kết quả exp11/exp11c TRƯỚC fix bị nhiễm kỹ xảo này → cần re-run (exp11d). Kết quả có thể
+lệch chút vì trước đó checkpoint được chọn theo F_re.
+
+**Kiểm chứng.** `py_compile` OK.
+
+---
+
 ## [exp11c] — 2026-06-02 — Cơ chế override config + sweep IHL tìm sweet-spot
 
 **Động cơ.** exp11b (IHL=0.5) cho forget_ce(1.57) < test_ce(1.74) → còn dư địa đẩy forget mạnh

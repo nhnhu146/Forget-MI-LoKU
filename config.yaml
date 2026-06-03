@@ -61,7 +61,11 @@ parameters:
   unlearn_epochs:
     value: 8                                              # [EXP 08] ít hơn — subtraction làm việc tại init
   early_stop_patience:
-    value: 4                                              # [EXP 08] CosSim sẽ TĂNG (gần F_re hơn) → stop khi plateau
+    value: 4                                              # số epoch chờ trước khi dừng
+  early_stop_metric:
+    value: "val"                                          # [EXP 11] HONEST: dừng theo loss VALIDATION (không đụng F_re).
+                                                          # "cossim" = theo độ giống F_re (gold) — CHỈ cho biến thể cho phép
+                                                          # F_re (exp10c). "none" = chạy đủ epoch. exp11 phải để "val".
   grad_clip:
     value: 1.0
   warmup_proportion:
@@ -134,9 +138,8 @@ parameters:
   # [EXP 11] BẬT IHL làm tín hiệu forget (bounded, KHÔNG cần teacher F_re) thay cho
   # distill_forget. Đẩy forget loss lên kiểu self-stopping → ghìm MIA mà không lệ thuộc gold.
   ihl_forget_weight:
-    value: 0.5                                            # [EXP 11b] IHL=1.5 đẩy forget QUÁ tay (forget-loss >> test
-                                                          # → MIA 0.143 "giả"/over-forget). Hạ 0.5 để forget chỉ lên ≈ test
-                                                          # → MIA về gần retrained tự nhiên. Ablate 0.3/0.5/0.75.
+    value: 0.75                                           # [EXP 11c] sweet-spot: forget_ce ≈ test_ce (không over-forget),
+                                                          # Forget-AUC ≈ paper, MIA lành mạnh. (IHL=1.5 over-forget; 0.5 hơi nhẹ)
 
   # ===== Forget-margin (bounded loss) =====
   forget_margin:
