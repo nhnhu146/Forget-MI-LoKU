@@ -14,7 +14,6 @@ Standalone CLI (for retroactive update from a CSV row):
 """
 from __future__ import annotations
 import re
-import sys
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -59,8 +58,31 @@ def _replace_marker(text: str, marker: str, content: str) -> str:
 # ---------- ID/file lookup ----------
 
 def _slug(s: str) -> str:
+    """Convert experiment name to filesystem-safe slug.
+
+    Strips any leading 'exp<N>[a-z]*_' to avoid double-prefix bug:
+    The tracker auto-prepends 'exp_NNN_', so user-provided names like
+    'exp03_classifier_unfrozen' would produce 'exp_003_exp03_classifier_unfrozen.md'.
+    By stripping the leading 'exp<N>[a-z]*_', we get the clean 'exp_003_classifier_unfrozen.md'.
+
+    Examples:
+        'exp03_classifier_unfrozen'    -> 'classifier_unfrozen'
+        'exp11_final_ihl075_seed42'    -> 'final_ihl075_seed42'
+        'exp10c_image_fila_distill'    -> 'image_fila_distill'
+        'final_ihl075_3per_seed42'     -> 'final_ihl075_3per_seed42' (unchanged)
+        'loku_v1_baseline'             -> 'loku_v1_baseline' (unchanged)
+    """
     s = re.sub(r'[\s\-]+', '_', s.strip().lower())
-    return re.sub(r'[^a-z0-9_]', '', s)
+    s = re.sub(r'[^a-z0-9_]', '', s)
+    # Strip leading exp prefix. Matches:
+    #   exp_                    → ''   (bare 'exp' + underscore)
+    #   exp03_                  → ''   (exp + digits, no underscore)
+    #   exp_006_                → ''   (exp + underscore + digits)
+    #   exp10c_                 → ''   (exp + digits + letter suffix)
+    #   exp_08_                 → ''   (combined)
+    # Does NOT strip 'exp' from things like 'experiment_X' (no _+ right after exp prefix).
+    s = re.sub(r'^exp(_?\d+[a-z]*)?_+', '', s)
+    return s
 
 
 def _find_or_alloc(name: str) -> tuple[int, Path, bool]:

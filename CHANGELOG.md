@@ -53,7 +53,7 @@ hơn (Forget-AUC ↓) mà chưa over-forget. Cần sweep IHL để tìm điểm 
 - `run_mia` trả thêm `retain_ce/test_ce/forget_ce`; results + CSV thêm `final/forget_ce`,
   `final/test_ce`, và cột `ihl`, `img_subtract` → bảng sweep map theo IHL & thấy forget-vs-test.
 - (`run.ipynb`) Cell 4 → **sweep IHL {0.5,0.75,1.0}** (single seed 42), in bảng forget_ce/test_ce
-  + cờ over-forget, ghi `experiments/exp11c_ihl_sweep_summary.md`.
+  + cờ over-forget, ghi `experiments/summary_ihl_sweep_with_fre.md`.
 
 **Kiểm chứng.** `py_compile` OK.
 
