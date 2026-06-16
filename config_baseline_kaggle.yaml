@@ -1,0 +1,153 @@
+# ============================================================================
+# CONFIG cho Forget-MI BASELINE trên Kaggle
+# ============================================================================
+# File này dùng cho `training/forgetmi_partial.py` (baseline GỐC, không LoKU).
+# Khác config.yaml (LoKU) ở chỗ:
+#   - Paths trỏ tới /kaggle/input/ và /kaggle/working/
+#   - KHÔNG có các params LoKU-specific (lora_*, ihl_*, distill_*, kappa_*, fila_*)
+#   - Loss weights theo "Unimodal" setting paper (best ở 3%)
+#
+# Cách chạy (trong notebook Kaggle):
+#   !PYTHONPATH=. WANDB_MODE=disabled python training/forgetmi_partial.py \
+#       --config config_baseline_kaggle.yaml --seed 42 \
+#       --override "forget_set_path=./data_splits/forget_set_3per.csv,id=baseline_3per_s42" \
+#       --exp baseline_3per_seed42 --hypothesis "Reproduce paper Table 2 3% Unimodal"
+#
+# Đổi forget% qua --override:
+#   forget_set_path=./data_splits/forget_set_6per.csv  → 6%
+#   forget_set_path=./data_splits/forget_set_10per.csv → 10%
+# ============================================================================
+program: training/forgetmi_partial.py
+method: random
+parameters:
+  # ===== WandB (disabled trên Kaggle qua env WANDB_MODE=disabled) =====
+  wandb_project:
+    value: "forget_mi_baseline"
+  wandb_entity:
+    value: null                                              # null = không gắn entity (tránh fail)
+
+  # ===== Data paths (KAGGLE: dataset đã upload vào /kaggle/input/) =====
+  # ⚠️ ĐIỀU CHỈNH các path này theo tên Kaggle Dataset của bạn:
+  base_model_path:
+    value: "/kaggle/input/forget-mi-models/training_original_model"
+  retrained_model_path:
+    value: "/kaggle/input/forget-mi-models/model_retrained_3per"
+  bert_pretrained_dir:
+    value: "/kaggle/input/forget-mi-models/training_original_model"
+  text_data_dir:
+    value: "/kaggle/input/forget-mi-data/metadata"
+  img_data_dir:
+    value: "/kaggle/input/forget-mi-data/img_data"
+  data_split_path:
+    value: "./data_splits/mimic-cxr-sub-img-edema-split-manualtest.csv"
+  synonyms_dir:
+    value: "./data_splits/Synonyms.csv"
+  forget_set_path:
+    value: "./data_splits/forget_set_3per.csv"               # default 3% — override qua CLI
+  output_dir:
+    value: "/kaggle/working/baseline_output"                 # Kaggle output dir
+
+  # ===== Dataset prep =====
+  max_seq_length:
+    value: 320
+  text_noise_level:
+    value: 0.5
+  output_channel_encoding:
+    value: "multiclass"
+  reprocess_input_data:
+    value: false
+  validation_ratio:
+    value: 0.1
+  random_point_ratio:
+    value: 0.1
+  random_seed:
+    value: 42                                                # override qua --seed
+  id:
+    value: "baseline_3per"
+
+  # ===== Training =====
+  do_train:
+    value: true
+  do_eval:
+    value: false
+  overwrite_output_dir:
+    value: true
+  use_noise:
+    value: false                                             # paper "Unimodal" setting
+  learning_rate:
+    value: 1.0e-4                                            # paper baseline lr
+  weight_decay:
+    value: 0.01
+  unlearn_epochs:
+    value: 30                                                # paper: 30 epochs
+  scheduler:
+    value: "ReduceLROnPlateau"
+  warmup_proportion:
+    value: 0.1
+  unlearn_batch_size:
+    value: 16
+  eval_batch_size:
+    value: 16
+  eval_max_retain:
+    value: 512                                               # cap retain forwards in eval
+  mia_paper_batch_size:
+    value: 32
+  num_cpu_workers:
+    value: 2
+  max_grad_norm:
+    value: 1.0
+
+  # ===== Noise (only used if use_noise=true) =====
+  noise_mean:
+    value: 0
+  noise_std:
+    value: 0.1
+
+  # ===== Loss weights — "Unimodal" setting (best for 3% per paper Table 2) =====
+  # w_uu=0.4, w_ur=0.4, w_mu=0.1, w_mr=0.1 (sẽ normalize trong main())
+  # Code maps: alpha=UR, beta=UU, theta=MU, gamma=MR
+  alpha:
+    value: 4                                                 # UR weight (raw, sẽ normalize)
+  beta:
+    value: 4                                                 # UU weight
+  theta:
+    value: 1                                                 # MU weight
+  gamma:
+    value: 1                                                 # MR weight
+
+  # ===== Model architecture flags =====
+  bert_pool_last_hidden:
+    value: false
+  bert_pool_use_img:
+    value: false
+  bert_pool_img_lowerlevel:
+    value: false
+
+  # ===== Misc (cho tương thích với shared modules) =====
+  use_text_data_dir:
+    value: false
+  use_data_split_path:
+    value: false
+  training_mode:
+    value: "supervised"
+  semisupervised_training_data:
+    value: "allCXR"
+  use_masked_txt:
+    value: false
+  use_all_data:
+    value: false
+  use_pretrained_checkpoint:
+    value: false
+  print_predictions:
+    value: false
+  print_embeddings:
+    value: false
+  logging_steps:
+    value: 50
+  save_epochs:
+    value: 5
+
+command:
+  - ${env:PYTHON}
+  - training/forgetmi_partial.py
+  - --config=config_baseline_kaggle.yaml

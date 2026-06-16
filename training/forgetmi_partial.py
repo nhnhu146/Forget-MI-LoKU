@@ -77,8 +77,10 @@ class AlignedSampler(Sampler):
         indices = list(range(self.dataset_length))
         if self.shuffle:
             if self.seed is not None:
-                torch.manual_seed(self.seed) 
-            torch.randperm(len(indices))  # Shuffle the indices
+                torch.manual_seed(self.seed)
+            # BUG FIX 2026-06-16: `torch.randperm(...)` không assign → shuffle vô hiệu.
+            # Phải assign về `indices` để vòng iter thực sự shuffle.
+            indices = torch.randperm(len(indices)).tolist()
         return iter(indices)
 
     def __len__(self):
@@ -521,122 +523,374 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
     
     return retain_dataloader, forget_dataloader, val_dataloader, test_dataloader
     
-def main():
-    # ------------------------------------------- WANDB & LOSS COEFFICIENTS & NOISE ------------------------------------------- 
-    import yaml
-    
-    # 1. Đọc file config.yaml thủ công
-    with open("config.yaml", "r") as f:
-        raw_config = yaml.safe_load(f)
-        
-    # 2. Trích xuất các tham số từ mục 'parameters'
-    my_config = {}
-    for key, val in raw_config["parameters"].items():
-        if "value" in val:
-            my_config[key] = val["value"]
-        elif "values" in val:
-            my_config[key] = val["values"][0] # Lấy giá trị đầu tiên trong list để test
-            
-    # 3. Khởi tạo W&B và truyền cấu hình vào
-    wandb.init(project="unlearning-mbzuai", entity="forget_exp", config=my_config)
-    config = wandb.config
+def _parse_cli():
+    """CLI args added 2026-06-16 for Kaggle/multi-seed compatibility.
 
+    Backward-compatible: nếu chạy `python forgetmi_partial.py` không args, sẽ tự đọc
+    `config.yaml` ở CWD và behavior y nguyên bản gốc.
+    """
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument('--config', default='config.yaml',
+                   help='Path tới YAML config (default: config.yaml ở CWD)')
+    p.add_argument('--seed', type=int, default=None,
+                   help='Override random_seed (multi-seed runs)')
+    p.add_argument('--override', default='',
+                   help='Comma-separated k=v overrides, vd: forget_set_path=./data_splits/forget_set_6per.csv,id=test')
+    p.add_argument('--exp', default=None,
+                   help='Tên experiment cho auto-tracker MD file')
+    p.add_argument('--hypothesis', default=None,
+                   help='Hypothesis cho experiment tracker')
+    p.add_argument('--fresh', action='store_true',
+                   help='Xóa output_dir cũ trước khi train')
+    return p.parse_args()
+
+
+def _load_config(args_cli):
+    """Load YAML config + apply --seed / --override. Returns dict."""
+    import yaml
+    with open(args_cli.config, 'r') as f:
+        raw = yaml.safe_load(f)
+
+    cfg = {}
+    for k, v in raw.get('parameters', {}).items():
+        if isinstance(v, dict):
+            if 'value' in v:
+                cfg[k] = v['value']
+            elif 'values' in v:
+                cfg[k] = v['values'][0]
+        else:
+            cfg[k] = v
+
+    # CLI overrides
+    if args_cli.seed is not None:
+        cfg['random_seed'] = args_cli.seed
+    for kv in (args_cli.override or '').split(','):
+        kv = kv.strip()
+        if not kv or '=' not in kv:
+            continue
+        k, v = kv.split('=', 1)
+        # auto-cast: int → float → str
+        try:
+            cfg[k.strip()] = int(v)
+        except ValueError:
+            try:
+                cfg[k.strip()] = float(v)
+            except ValueError:
+                cfg[k.strip()] = v.strip()
+    return cfg
+
+
+def _init_wandb(my_config):
+    """Init WandB, fallback to SimpleNamespace nếu WANDB_MODE=disabled hoặc lỗi auth.
+
+    Returns config object có attribute access (`config.alpha`, etc.).
+    """
+    wandb_mode = os.environ.get('WANDB_MODE', '').lower()
+    if wandb_mode in ('disabled', 'offline'):
+        print(f"ℹ️  WANDB_MODE={wandb_mode} → bỏ qua wandb.init, dùng SimpleNamespace config.")
+        from types import SimpleNamespace
+        cfg = SimpleNamespace(**my_config)
+        cfg.get = lambda k, d=None: getattr(cfg, k, d)
+        return cfg
+
+    try:
+        wandb.init(
+            project=my_config.get('wandb_project', 'unlearning-mbzuai'),
+            entity=my_config.get('wandb_entity', None),  # None = dùng default user
+            config=my_config,
+        )
+        return wandb.config
+    except Exception as e:
+        print(f"⚠️  wandb.init failed ({e}). Fallback sang SimpleNamespace.")
+        from types import SimpleNamespace
+        cfg = SimpleNamespace(**my_config)
+        cfg.get = lambda k, d=None: getattr(cfg, k, d)
+        return cfg
+
+
+def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained,
+                      dataset, elapsed_h, trainable, total_params, tracker=None):
+    """Final eval block — port từ forgetmi_loku.py để có đầy đủ 12 metrics cho luận văn.
+
+    Tái sử dụng các helper trong forgetmi_loku (run_mia, cosine_sim_models, perf_metrics)
+    để baseline và LoKU dùng CÙNG eval logic → so sánh fair.
+    """
+    print("\n" + "=" * 60)
+    print("📈 FINAL EVALUATION (baseline Forget-MI)")
+    print("=" * 60)
+
+    # Import helpers từ forgetmi_loku
+    from training.forgetmi_loku import (
+        run_mia, cosine_sim_models, perf_metrics, _subsample_dataset
+    )
+
+    model_unlearn.eval()
+    for p in model_unlearn.parameters():
+        p.requires_grad = False
+    torch.cuda.empty_cache()
+
+    eval_max_retain = int(getattr(config, 'eval_max_retain', 512))
+    bs = int(getattr(config, 'eval_batch_size', 16))
+    paper_bs = int(getattr(config, 'mia_paper_batch_size', 32))
+
+    # 1. MIA (per-sample + paper-style)
+    try:
+        print("🛡️  Computing MIA scores...")
+        mia_res = run_mia(model_unlearn, dataset['retain'], dataset['test'], dataset['forget'],
+                          device, config, batch_size=bs,
+                          seed=int(config.random_seed), paper_batch_size=paper_bs)
+        mia = mia_res['persample']
+        mia_paper = mia_res['paper']
+        forget_ce = mia_res.get('forget_ce', float('nan'))
+        test_ce = mia_res.get('test_ce', float('nan'))
+    except Exception as e:
+        print(f"⚠️  MIA failed: {e}")
+        mia = mia_paper = forget_ce = test_ce = float('nan')
+
+    # 2. CosSim vs retrained
+    try:
+        print("📐 Computing CosSim vs retrained model...")
+        cossim_ds = _subsample_dataset(dataset['retain'], eval_max_retain, int(config.random_seed))
+        cossim_re = cosine_sim_models(model_unlearn, model_retrained, cossim_ds, device, config, batch_size=bs)
+    except Exception as e:
+        print(f"⚠️  CosSim failed: {e}")
+        cossim_re = float('nan')
+
+    # 3. Test + Forget perf
+    try:
+        print("📊 Performance on test set...")
+        test_m = perf_metrics(model_unlearn, dataset['test'], device, config, batch_size=bs)
+    except Exception as e:
+        print(f"⚠️  Test perf failed: {e}")
+        test_m = {'AUC': float('nan'), 'Macro_F1': float('nan'), 'F1': float('nan')}
+
+    try:
+        print("📊 Performance on forget set...")
+        forget_m = perf_metrics(model_unlearn, dataset['forget'], device, config, batch_size=bs)
+    except Exception as e:
+        print(f"⚠️  Forget perf failed: {e}")
+        forget_m = {'AUC': float('nan'), 'Macro_F1': float('nan'), 'F1': float('nan')}
+
+    gpu_peak = (torch.cuda.max_memory_allocated() / 1e9
+                if torch.cuda.is_available() else 0.0)
+
+    results = {
+        'final/MIA':         round(mia, 3),
+        'final/MIA_paper':   round(mia_paper, 3),
+        'final/forget_ce':   round(forget_ce, 3),
+        'final/test_ce':     round(test_ce, 3),
+        'final/Df_AUC':      round(forget_m['AUC'], 3),
+        'final/Df_F1':       round(forget_m['Macro_F1'], 3),
+        'final/Dt_AUC':      round(test_m['AUC'], 3),
+        'final/Dt_F1':       round(test_m['Macro_F1'], 3),
+        'final/dist_vs_re':  round(1 - cossim_re, 3),
+        'final/cossim_vs_re': round(cossim_re, 4),
+        'efficiency/unlearn_time_hours': round(elapsed_h, 3),
+        'efficiency/gpu_peak_GB':        round(gpu_peak, 2),
+        'efficiency/trainable_params':   int(trainable),
+        'efficiency/total_params':       int(total_params),
+        'efficiency/trainable_ratio':    round(trainable / total_params, 5),
+    }
+
+    # Log to WandB if active
+    try:
+        wandb.log(results)
+    except Exception:
+        pass
+
+    # Print summary
+    print("\n" + "─" * 60)
+    print(" METRIC                    | VALUE   | PAPER TARGET ")
+    print("─" * 60)
+    print(f"  MIA_persample (↓)        | {mia:.3f}  | (per-sample SVM)")
+    print(f"  MIA_paper     (↓)        | {mia_paper:.3f}  | 0.571 (3%) / 0.615 (6%) / 0.810 (10%)")
+    print(f"  Forget AUC    (↓)        | {forget_m['AUC']:.3f}  | 0.735 (3%) / 0.654 (6%) / 0.656 (10%)")
+    print(f"  Forget Mac-F1 (↓)        | {forget_m['Macro_F1']:.3f}  | 0.393 (3%) / 0.328 (6%) / 0.313 (10%)")
+    print(f"  Test AUC      (↑)        | {test_m['AUC']:.3f}  | 0.625 (3%) / 0.599 (6%) / 0.565 (10%)")
+    print(f"  Test Mac-F1   (↑)        | {test_m['Macro_F1']:.3f}  | 0.250 (3%) / 0.270 (6%) / 0.252 (10%)")
+    print(f"  1 - CosSim    (↓)        | {1-cossim_re:.3f}")
+    print("─" * 60)
+    print(f"  Time (hours)             | {elapsed_h:.3f}  | Forget-MI paper: ~5h")
+    print(f"  GPU peak (GB)            | {gpu_peak:.2f}")
+    print(f"  Trainable params         | {trainable:,} ({100*trainable/total_params:.3f}%)")
+    print("─" * 60)
+
+    # CSV summary (cùng format LoKU để Cell 5 notebook gộp được)
+    csv_path = os.path.join(output_dir, "..", "results_summary.csv")
+    csv_path = os.path.normpath(csv_path)
+    row = {**{k.split('/')[-1]: v for k, v in results.items()},
+           'forget_pct': os.path.basename(config.forget_set_path),
+           'seed': int(config.random_seed),
+           'method': 'baseline_partial',
+           'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    new_file = not os.path.exists(csv_path)
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    with open(csv_path, 'a', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if new_file:
+            w.writeheader()
+        w.writerow(row)
+    print(f"\n💾 CSV row saved: {csv_path}")
+
+    # Auto-tracker MD (nếu --exp passed)
+    if tracker is not None:
+        tracker_results = {
+            'MIA':           float(mia) if mia == mia else float('nan'),
+            'MIA_paper':     float(mia_paper) if mia_paper == mia_paper else float('nan'),
+            'Df_AUC':        float(forget_m['AUC']),
+            'Df_F1':         float(forget_m['Macro_F1']),
+            'Dt_AUC':        float(test_m['AUC']),
+            'Dt_F1':         float(forget_m['Macro_F1']),
+            'dist_vs_re':    float(1 - cossim_re) if cossim_re == cossim_re else float('nan'),
+            'time_h':        float(elapsed_h),
+            'gpu_gb':        float(gpu_peak),
+            'trainable_pct': 100.0 * trainable / total_params,
+        }
+        try:
+            tracker.finalize(tracker_results, elapsed_h)
+        except Exception as e:
+            print(f"⚠️  Tracker.finalize failed: {e}")
+
+    return results
+
+
+def main():
+    """Forget-MI BASELINE main entrypoint.
+
+    CLI usage:
+        # Default (backward-compat):
+        python training/forgetmi_partial.py
+
+        # Multi-seed + override (Kaggle/Colab):
+        WANDB_MODE=disabled python training/forgetmi_partial.py \\
+            --config config_baseline_kaggle.yaml --seed 42 \\
+            --override "forget_set_path=./data_splits/forget_set_6per.csv,id=baseline_6per" \\
+            --exp baseline_6per_seed42 --hypothesis "Reproduce paper Table 2 6% Unimodal setting"
+    """
+    args_cli = _parse_cli()
+    my_config = _load_config(args_cli)
+
+    # ---- WandB (graceful fallback) ----
+    config = _init_wandb(my_config)
+
+    # ---- Normalize loss weights ----
     alpha = config.alpha
     beta = config.beta
     theta = config.theta
     gamma = config.gamma
-
     total = alpha + beta + theta + gamma
-
-    alpha = round(alpha / total, 2)
-    beta = round(beta / total, 2)
-    theta = round(theta / total, 2)
-    gamma = round(gamma / total, 2)
+    alpha, beta, theta, gamma = (round(x / total, 2) for x in (alpha, beta, theta, gamma))
 
     image_noise_params = {"mean": config.noise_mean, "std": config.noise_std}
-    unlearning_percentage_match = re.search(r'forget_set_(\d+)per\.csv', config.forget_set_path)
-    unlearning_percentage = int(unlearning_percentage_match.group(1)) if unlearning_percentage_match else None
+    pct_match = re.search(r'forget_set_(\d+)per\.csv', config.forget_set_path)
+    unlearning_percentage = int(pct_match.group(1)) if pct_match else None
 
-    wandb.log({
-        "seed": config.random_seed,
-        "unlearning_percentage": unlearning_percentage,
-        "use_noise": config.use_noise,
-        "val_ratio": config.validation_ratio,
-        "random_point_ratio": config.random_point_ratio,
-        "learning_rate": config.learning_rate,
-        "weight_decay": config.weight_decay,
-        "unlearn_epochs": config.unlearn_epochs,
-        "scheduler": config.scheduler,
-        "image_noise_mean": config.noise_mean,
-        "image_noise_std": config.noise_std,
-        "alpha": alpha,
-        "beta": beta,
-        "theta": theta,
-        "gamma": gamma,
-    })
+    try:
+        wandb.log({
+            "seed": config.random_seed, "unlearning_percentage": unlearning_percentage,
+            "use_noise": config.use_noise, "learning_rate": config.learning_rate,
+            "unlearn_epochs": config.unlearn_epochs,
+            "alpha": alpha, "beta": beta, "theta": theta, "gamma": gamma,
+        })
+    except Exception:
+        pass
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = (f"{alpha}_UKR_{beta}_UU_{gamma}_MD_{theta}_MKR_"
+                f"mean{config.noise_mean}_std{config.noise_std}_{config.use_noise}_"
+                f"{timestamp}_partials_hinge_euc")
+    try:
+        wandb.run.name = run_name
+    except Exception:
+        pass
 
-    run_name = f"{alpha}_UKR_{beta}_UU_{gamma}_MD_{theta}_MKR_mean{config.noise_mean}_std{config.noise_std}_{config.use_noise}_{timestamp}_partials_hinge_euc"
-    wandb.run.name = run_name
-
-    # ------------------------------------------- SEED & DEVICE ------------------------------------------- 
+    # ---- Seed & device ----
     set_seed(config.random_seed)
     torch.cuda.empty_cache()
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
-    # ------------------------------------------- LOAD MODELS ------------------------------------------- 
-    output_dir = os.path.join(config.output_dir, run_name)
-    os.makedirs(output_dir, exist_ok=True) 
-    print(f"Unlearned model will be saved in {output_dir}")
+    if not torch.cuda.is_available():
+        print("⚠️  KHÔNG có GPU — baseline sẽ cực kỳ chậm (~25× chậm hơn)")
 
+    # ---- Output dir ----
+    output_dir = os.path.join(config.output_dir, run_name)
+    if args_cli.fresh and os.path.exists(output_dir):
+        import shutil
+        shutil.rmtree(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"📁 Output: {output_dir}")
+
+    # ---- Auto-tracker (nếu --exp) ----
+    tracker = None
+    if args_cli.exp:
+        try:
+            from scripts.exp_tracker import ExpTracker
+            tracker = ExpTracker(name=args_cli.exp, hypothesis=args_cli.hypothesis)
+        except Exception as e:
+            print(f"⚠️  Tracker init failed ({e}). Tiếp tục không tracker.")
+
+    # ---- Load models ----
+    print(f"📦 Loading models...")
     model_og = ImageTextModel.from_pretrained(config.base_model_path).to(device)
     model_unlearn = copy.deepcopy(model_og)
     model_retrained = ImageTextModel.from_pretrained(config.retrained_model_path).to(device)
 
     tokenizer = BertTokenizer.from_pretrained(config.bert_pretrained_dir)
 
-    # freeze original and retrained
-    for param in model_og.parameters():
-        param.requires_grad = False
+    for p in model_og.parameters(): p.requires_grad = False
+    for p in model_retrained.parameters(): p.requires_grad = False
+    for p in model_unlearn.parameters(): p.requires_grad = True
 
-    for param in model_retrained.parameters():
-        param.requires_grad = False
+    trainable = sum(p.numel() for p in model_unlearn.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model_unlearn.parameters())
+    print(f"📊 Trainable: {trainable:,} / {total_params:,} ({100*trainable/total_params:.3f}%) — baseline full FT")
 
-    # enable gradient updates for unlearning
-    for param in model_unlearn.parameters():
-        param.requires_grad = True
-
-    # ------------------------------------------- OPTIMIZATION SETUP ------------------------------------------- 
+    # ---- Optimizer ----
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     param_optimizer = list(model_unlearn.named_parameters())
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)],
          'weight_decay': config.weight_decay},
-        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)],
          'weight_decay': 0.0},
     ]
     optimizer = AdamW(optimizer_grouped_parameters, lr=float(config.learning_rate))
     scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", threshold=1e-6)
 
-    # ------------------------------------------- BUILD DATASET ------------------------------------------- 
+    # ---- Build dataset ----
     dataset, num_labels = build_dataset(config, tokenizer, image_noise_params=image_noise_params)
 
-    # ------------------------------------------- START UNLEARNING ------------------------------------------- 
-    retain_dataloader, forget_dataloader, val_dataloader, test_dataloader = unlearn(
-        config, output_dir, device, model_og, model_unlearn, model_retrained, optimizer, 
-        optimizer_grouped_parameters, scheduler, tokenizer, dataset, num_labels, alpha, beta, theta, gamma
-    )
+    # Add n_* counts (legacy: unlearn() expects them)
+    dataset['n_retain'] = len(dataset['retain'])
+    dataset['n_val'] = len(dataset['validation'])
+    dataset['n_test'] = len(dataset['test'])
+    dataset['n_rand'] = len(dataset['random'])
+    dataset['n_forget'] = len(dataset['forget'])
 
-    # Evaluate the model - the final weights only, perform manually.
-#     metrics = evaluate(
-#     model_og, model_unlearn, model_retrained, 
-#     retain_dataloader, forget_dataloader, val_dataloader, test_dataloader, 
-#     device, args, mode='test')
-    # flattened_metrics = flatten_metrics(metrics)
-    # wandb.log(flattened_metrics)
+    # ---- Train ----
+    train_start = time.time()
+    unlearn(
+        config, output_dir, device, model_og, model_unlearn, model_retrained,
+        optimizer, optimizer_grouped_parameters, scheduler, tokenizer,
+        dataset, num_labels, alpha, beta, theta, gamma
+    )
+    elapsed_h = (time.time() - train_start) / 3600
+
+    # Free training-only memory
+    del model_og, optimizer
+    torch.cuda.empty_cache()
+
+    # ---- Final evaluation ----
+    _final_evaluation(config, output_dir, device, model_unlearn, model_retrained,
+                      dataset, elapsed_h, trainable, total_params, tracker=tracker)
+
+    try:
+        wandb.finish()
+    except Exception:
+        pass
+
 
 if __name__ == '__main__':
     main()
-    wandb.finish()
-    
