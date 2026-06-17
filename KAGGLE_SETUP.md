@@ -5,77 +5,80 @@
 ## TL;DR
 
 ```
-1. Upload 2 Kaggle Datasets (data + models) — 1 LẦN
+1. Upload data + models lên Kaggle Datasets — 1 LẦN
 2. Setup Kaggle Secrets cho GitHub push — 1 LẦN
 3. Tạo Kaggle Notebook → Add data → Add secrets → Settings: GPU T4
 4. Upload run_kaggle_baseline.ipynb → Run cells
 ```
 
+> ⚠️ **Quan trọng**: Data CONTENT giống hệt với Colab — bạn **KHÔNG cần chuẩn bị zip mới**.
+> Chỉ cần upload 3 zip đã có sẵn trên Google Drive lên Kaggle.
+
 ---
 
-## 1. Chuẩn bị 2 Kaggle Datasets
+## 1. Chuẩn bị Kaggle Datasets
 
-### Dataset 1: `forget-mi-data`
-**Nội dung**: Toàn bộ thư mục `data/` của project (text + image).
+### 🎯 Data cần upload = chính xác 3 zip bạn đang dùng trên Colab
 
-**Cấu trúc upload**:
+Theo `setup_data.py`, project dùng 3 zip:
+
+| Zip file | Nội dung | Sau extract (Colab) |
+|---|---|---|
+| `data.zip` | `text_data/`, `img_data/`, `metadata/` | `./data/` |
+| `base_model.zip` | Pretrained model files | `./forgetme/training_original_model/` |
+| `retrained_model.zip` | Retrained 3% model files | `./model_retrained_3per/` |
+
+### Bước 1: Tải 3 zip từ Drive về máy local
 ```
-forget-mi-data/
-├── metadata/
-│   ├── all_data.tsv
-│   ├── cachedfeatures_train_seqlen-320_multiclass     (sau khi đã generate)
-│   └── cachednoisyfeatures_train_seqlen-320_multiclass
-├── img_data/
-│   ├── <patient_id_1>/
-│   │   └── *.png
-│   └── ...
-└── text_data/                                         (raw reports, có thể skip nếu đã có cache)
-    └── ...
-```
-
-**Cách upload**:
-
-**Option A — Local zip + upload** (đơn giản, nhưng phải đợi upload):
-```bash
-# Trên máy bạn:
-cd "d:/Hoang Nhu/UNIVERSITY/4th YEAR/Khoa luan tot nghiep/Code/Forget-MI-main/Forget-MI-main"
-zip -r forget-mi-data.zip data/metadata data/img_data data/text_data
-# Upload zip lên Kaggle Datasets → Kaggle tự giải nén
+Google Drive → Forget-MI-Project/data.zip → Tải xuống
+Google Drive → Forget-MI-Project/base_model.zip → Tải xuống
+Google Drive → Forget-MI-Project/retrained_model.zip → Tải xuống
 ```
 
-**Option B — Copy từ Drive xuống Kaggle qua API** (nhanh nếu Drive đã có):
-```bash
-# Sau khi đã setup Kaggle CLI:
-kaggle datasets init -p ./forget_mi_data_kaggle/
-cd forget_mi_data_kaggle/
-# ... copy files ...
-kaggle datasets create -p ./
+### Bước 2: Upload lên Kaggle — chọn 1 trong 2 option
+
+#### 🟢 Option A: 3 Datasets riêng (1:1 với Drive — DỄ NHẤT)
+
+| Kaggle Dataset | Upload zip | Path sau extract |
+|---|---|---|
+| `forget-mi-data` | `data.zip` | `/kaggle/input/forget-mi-data/...` |
+| `forget-mi-base-model` | `base_model.zip` | `/kaggle/input/forget-mi-base-model/...` |
+| `forget-mi-retrained` | `retrained_model.zip` | `/kaggle/input/forget-mi-retrained/...` |
+
+→ Tốn 3 lần "Add data" trong notebook nhưng KHÔNG cần repackage.
+
+#### 🟡 Option B: 2 Datasets (gộp model — match KAGGLE_SETUP cũ)
+
+| Kaggle Dataset | Upload zip(s) | Path sau extract |
+|---|---|---|
+| `forget-mi-data` | `data.zip` | `/kaggle/input/forget-mi-data/...` |
+| `forget-mi-models` | **CẢ** `base_model.zip` + `retrained_model.zip` | `/kaggle/input/forget-mi-models/...` |
+
+→ Kaggle Dataset cho phép multi-file: chọn cả 2 zip cùng lúc khi tạo dataset.
+
+### Bước 3: ⚠️ XÁC NHẬN paths sau khi Kaggle auto-extract
+
+Kaggle tự giải nén zip khi tạo Dataset. **Cấu trúc cuối cùng phụ thuộc nested level trong zip gốc**:
+
+| Zip nội dung | Path Kaggle | Khớp config mặc định? |
+|---|---|---|
+| **Nested**: `data.zip` chứa `data/text_data/...` | `/kaggle/input/forget-mi-data/data/text_data/...` | ❌ — cần sửa config |
+| **Flat**: `data.zip` chứa thẳng `text_data/, img_data/, metadata/` | `/kaggle/input/forget-mi-data/text_data/...` | ❌ — cần sửa config |
+| **Nested 1 lớp** (như mặc định KAGGLE_SETUP): `data.zip` chứa `metadata/, img_data/, text_data/` (không có wrapper `data/`) | `/kaggle/input/forget-mi-data/metadata/...` | ✅ |
+
+→ **Kiểm tra sau upload**: Vào Kaggle Dataset → "Data" tab → "File Browser" → xem cấu trúc thực tế.
+
+→ Nếu khác mặc định, **sửa paths** trong `config_baseline_kaggle.yaml` (mục `base_model_path`, `text_data_dir`, `img_data_dir`, `bert_pretrained_dir`, `retrained_model_path`).
+
+### Bước 4: Cell 2 trong notebook sẽ verify paths
+
+Sau khi tạo Kaggle Notebook + Add Data, chạy **Cell 2** sẽ check:
 ```
-
-Sau khi upload, dataset path sẽ là: `/kaggle/input/forget-mi-data/`
-
-### Dataset 2: `forget-mi-models`
-**Nội dung**: Pretrained model + retrained model.
-
-**Cấu trúc**:
+✅ Base model      /kaggle/input/forget-mi-models/training_original_model/pytorch_model.bin
+✅ Text metadata   /kaggle/input/forget-mi-data/metadata
+...
 ```
-forget-mi-models/
-├── training_original_model/
-│   ├── pytorch_model.bin
-│   ├── config.json
-│   ├── vocab.txt
-│   └── ...
-└── model_retrained_3per/
-    ├── pytorch_model.bin
-    ├── config.json
-    └── ...
-```
-
-**Cách upload**: Tương tự dataset 1 — zip + upload qua web UI hoặc CLI.
-
-→ Path: `/kaggle/input/forget-mi-models/`
-
-> ⚠️ Nếu đặt tên dataset khác (vd `mimic-data`), nhớ **đổi paths** trong `config_baseline_kaggle.yaml`.
+Nếu thấy ❌ → chỉnh paths trong config_baseline_kaggle.yaml cho đúng cấu trúc thực tế.
 
 ---
 
