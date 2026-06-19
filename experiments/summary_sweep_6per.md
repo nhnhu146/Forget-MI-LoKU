@@ -1,6 +1,6 @@
 # Sweep Summary — FORGET 6% (1 seed test)
 
-_Generated: 2026-06-19 12:40:49_
+_Generated: 2026-06-19 12:50:42_
 
 **Seed**: [42, 123, 7]
 **Configs tested**: 1
