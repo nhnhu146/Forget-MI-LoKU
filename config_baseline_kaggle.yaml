@@ -34,10 +34,12 @@ parameters:
     value: "/kaggle/input/forget-mi-models/model_retrained_3per"
   bert_pretrained_dir:
     value: "/kaggle/input/forget-mi-models/training_original_model"
+  # NOTE: data.zip có nested wrapper `data/` → paths phải có `/data/`
+  # Confirmed bởi File Browser: /kaggle/input/forget-mi-data/data/{metadata,img_data,text_data}/
   text_data_dir:
-    value: "/kaggle/input/forget-mi-data/metadata"
+    value: "/kaggle/input/forget-mi-data/data/metadata"
   img_data_dir:
-    value: "/kaggle/input/forget-mi-data/img_data"
+    value: "/kaggle/input/forget-mi-data/data/img_data"
   data_split_path:
     value: "./data_splits/mimic-cxr-sub-img-edema-split-manualtest.csv"
   synonyms_dir:
