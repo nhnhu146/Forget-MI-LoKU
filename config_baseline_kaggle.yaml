@@ -27,13 +27,18 @@ parameters:
     value: null                                              # null = không gắn entity (tránh fail)
 
   # ===== Data paths (KAGGLE: dataset đã upload vào /kaggle/input/) =====
-  # ⚠️ ĐIỀU CHỈNH các path này theo tên Kaggle Dataset của bạn:
+  # ⚠️ Cấu trúc thực tế forget-mi-models Dataset có nested wrappers:
+  #   /kaggle/input/forget-mi-models/
+  #   ├── base_model/              ← wrapper từ zip base_model.zip
+  #   │   └── training_original_model/
+  #   └── retrained_model/         ← wrapper từ zip retrained_model.zip
+  #       └── model_retrained_3per/
   base_model_path:
-    value: "/kaggle/input/forget-mi-models/training_original_model"
+    value: "/kaggle/input/forget-mi-models/base_model/training_original_model"
   retrained_model_path:
-    value: "/kaggle/input/forget-mi-models/model_retrained_3per"
+    value: "/kaggle/input/forget-mi-models/retrained_model/model_retrained_3per"
   bert_pretrained_dir:
-    value: "/kaggle/input/forget-mi-models/training_original_model"
+    value: "/kaggle/input/forget-mi-models/base_model/training_original_model"
   # NOTE: data.zip có nested wrapper `data/` → paths phải có `/data/`
   # Confirmed bởi File Browser: /kaggle/input/forget-mi-data/data/{metadata,img_data,text_data}/
   text_data_dir:
