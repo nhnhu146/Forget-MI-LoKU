@@ -1237,12 +1237,19 @@ def main():
 
     # Save CSV summary (easy to copy into thesis tables)
     csv_path = os.path.join(out_dir, "results_summary.csv")
+    # 'id', 'epochs', 'kappa_cls_retain' added 2026-06-18:
+    # Without these, sweep notebooks cannot detect completed configs (uses id),
+    # leading to re-running everything from scratch on each Colab session.
+    # epochs + kappa needed because F_more_epochs/G_less_retain configs differ ONLY in these.
     row = {**{k.split('/')[-1]: v for k, v in results.items()},
+           'id': str(getattr(config, 'id', '')),
            'forget_pct': os.path.basename(config.forget_set_path),
            'seed': int(config.random_seed),
            'lora_r': int(config.lora_r),
            'ihl': float(getattr(config, 'ihl_forget_weight', 0.0)),
            'img_subtract': float(getattr(config, 'loku_image_subtract_scale', 0.0)),
+           'epochs': int(getattr(config, 'unlearn_epochs', 0)),
+           'kappa_cls_retain': float(getattr(config, 'kappa_cls_retain', 0.0)),
            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     new_file = not os.path.exists(csv_path)
     with open(csv_path, 'a', newline='') as f:

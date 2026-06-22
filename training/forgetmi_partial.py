@@ -719,7 +719,10 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
     # CSV summary (cùng format LoKU để Cell 5 notebook gộp được)
     csv_path = os.path.join(output_dir, "..", "results_summary.csv")
     csv_path = os.path.normpath(csv_path)
+    # 'id' added 2026-06-18 — same fix as forgetmi_loku.py: notebooks filter by id
+    # to detect completed configs. Without it, sweep/multi-seed re-runs everything.
     row = {**{k.split('/')[-1]: v for k, v in results.items()},
+           'id': str(getattr(config, 'id', '')),
            'forget_pct': os.path.basename(config.forget_set_path),
            'seed': int(config.random_seed),
            'method': 'baseline_partial',
