@@ -1237,10 +1237,7 @@ def main():
 
     # Save CSV summary (easy to copy into thesis tables)
     csv_path = os.path.join(out_dir, "results_summary.csv")
-    # 'id', 'epochs', 'kappa_cls_retain' added 2026-06-18:
-    # Without these, sweep notebooks cannot detect completed configs (uses id),
-    # leading to re-running everything from scratch on each Colab session.
-    # epochs + kappa needed because F_more_epochs/G_less_retain configs differ ONLY in these.
+    # 'id', 'epochs', 'kappa_cls_retain' added 2026-06-18.
     row = {**{k.split('/')[-1]: v for k, v in results.items()},
            'id': str(getattr(config, 'id', '')),
            'forget_pct': os.path.basename(config.forget_set_path),
@@ -1251,6 +1248,38 @@ def main():
            'epochs': int(getattr(config, 'unlearn_epochs', 0)),
            'kappa_cls_retain': float(getattr(config, 'kappa_cls_retain', 0.0)),
            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+    # SCHEMA MIGRATION: if CSV exists with FEWER cols than current row, rewrite
+    # với full schema để tránh ParserError khi đọc lại (pd.read_csv fails on
+    # row có nhiều cột hơn header). Bug discovered 2026-06-19.
+    if os.path.exists(csv_path):
+        try:
+            with open(csv_path, 'r', newline='') as f:
+                reader = csv.reader(f)
+                existing_header = next(reader, [])
+            new_keys = list(row.keys())
+            missing_in_header = [k for k in new_keys if k not in existing_header]
+            if missing_in_header:
+                print(f"🔧 CSV schema migration: adding {missing_in_header} to header")
+                # Read all old rows, re-write với union schema
+                with open(csv_path, 'r', newline='') as f:
+                    reader = csv.DictReader(f, restkey='_EXTRA', restval='')
+                    old_rows = []
+                    for r in reader:
+                        extra = r.pop('_EXTRA', None)
+                        if extra:  # ghi đè cột thừa từ rows trước fix
+                            for name, val in zip(missing_in_header, extra):
+                                r[name] = val
+                        old_rows.append(r)
+                union_keys = existing_header + missing_in_header
+                with open(csv_path, 'w', newline='') as f:
+                    w = csv.DictWriter(f, fieldnames=union_keys)
+                    w.writeheader()
+                    for r in old_rows:
+                        w.writerow({k: r.get(k, '') for k in union_keys})
+        except Exception as e:
+            print(f"⚠️  Schema migration failed ({e}) — appending may produce malformed CSV")
+
     new_file = not os.path.exists(csv_path)
     with open(csv_path, 'a', newline='') as f:
         w = csv.DictWriter(f, fieldnames=list(row.keys()))
