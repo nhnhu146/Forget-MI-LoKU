@@ -27,24 +27,22 @@ parameters:
     value: null                                              # null = không gắn entity (tránh fail)
 
   # ===== Data paths (KAGGLE: dataset đã upload vào /kaggle/input/) =====
-  # ⚠️ Cấu trúc thực tế forget-mi-models Dataset có nested wrappers:
-  #   /kaggle/input/forget-mi-models/
-  #   ├── base_model/              ← wrapper từ zip base_model.zip
-  #   │   └── training_original_model/
-  #   └── retrained_model/         ← wrapper từ zip retrained_model.zip
-  #       └── model_retrained_3per/
+  # ⚠️ Kaggle có 2 format mount paths:
+  #   Cũ: /kaggle/input/<slug>/...
+  #   Mới: /kaggle/input/datasets/<username>/<slug>/...   ← format hiện tại
+  # Notebook (Cell 3) sẽ AUTO-DETECT và override paths này.
+  # Default values dưới đây là cho format MỚI với username nhnhu146:
   base_model_path:
-    value: "/kaggle/input/forget-mi-models/base_model/training_original_model"
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-models/base_model/training_original_model"
   retrained_model_path:
-    value: "/kaggle/input/forget-mi-models/retrained_model/model_retrained_3per"
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-models/retrained_model/model_retrained_3per"
   bert_pretrained_dir:
-    value: "/kaggle/input/forget-mi-models/base_model/training_original_model"
-  # NOTE: data.zip có nested wrapper `data/` → paths phải có `/data/`
-  # Confirmed bởi File Browser: /kaggle/input/forget-mi-data/data/{metadata,img_data,text_data}/
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-models/base_model/training_original_model"
+  # Default cho format MỚI Kaggle. Notebook Cell 3 auto-detect và override.
   text_data_dir:
-    value: "/kaggle/input/forget-mi-data/data/metadata"
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-data/data/metadata"
   img_data_dir:
-    value: "/kaggle/input/forget-mi-data/data/img_data"
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-data/data/img_data"
   data_split_path:
     value: "./data_splits/mimic-cxr-sub-img-edema-split-manualtest.csv"
   synonyms_dir:
