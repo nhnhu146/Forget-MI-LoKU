@@ -420,9 +420,10 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
 
     model_re.eval()
     model_ul.train()
-    # Frozen + eval: prevents BN/dropout drift, and the no_grad blocks below kill
-    # the autograd graph for og forwards (the main T4 OOM source — ~5-6 GB saved).
-    model_og.eval()
+    # FAITHFUL to paper code: model_og.train() (NOT .eval()) — keeps BN running stats
+    # updating per-epoch as in the original Forget-MI repository. Weights still frozen
+    # (requires_grad=False set earlier) — only BN buffers drift.
+    model_og.train()
 
     unlearning_start_time = time.time()
 
