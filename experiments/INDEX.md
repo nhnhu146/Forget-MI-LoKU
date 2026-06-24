@@ -41,6 +41,8 @@ Sắp xếp theo thứ tự thời gian (mới nhất ở dưới). Auto-tracker
 | 023 | final_ihl075_seed123 | 2026-06-03 | 🔄 | 0.423 | 0.742 | 0.395 | 0.679 | 0.389 | 0.219 | 0.451% | _(auto, cần kết luận)_ |
 | 024 | final_ihl075_seed7 | 2026-06-03 | 🔄 | 0.488 | 0.733 | 0.363 | 0.674 | 0.340 | 0.167 | 0.451% | _(auto, cần kết luận)_ |
 | 025 | baseline_mimic_3per_seed42 | 2026-06-24 | 🔄 | 0.433 | 0.571 | 0.172 | 0.651 | 0.172 | 2.804 | 100.000% | _(auto, cần kết luận)_ |
+| 026 | baseline_mimic_3per_seed123 | 2026-06-24 | 🔄 | 0.234 | 0.571 | 0.172 | 0.651 | 0.172 | 2.886 | 100.000% | _(auto, cần kết luận)_ |
+| 027 | baseline_mimic_3per_seed7 | 2026-06-24 | 🔄 | 0.398 | 0.571 | 0.172 | 0.651 | 0.172 | 2.870 | 100.000% | _(auto, cần kết luận)_ |
 
 **Reference (paper Forget-MI, 3%)**: MIA=0.571 | Df_AUC=0.735 | Df_F1=0.393 | Dt_AUC=0.625 | Dt_F1=0.250 | Time=5h | Trainable=100%
 

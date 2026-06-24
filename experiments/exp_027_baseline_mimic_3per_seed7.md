@@ -1,13 +1,13 @@
-# Exp 026 — baseline_mimic_3per_seed123
+# Exp 027 — baseline_mimic_3per_seed7
 
 | Field | Value |
 |---|---|
 | **Date** | 2026-06-24 |
-| **Git commit** | `3c07687 (dirty)` |
+| **Git commit** | `3fbcb88 (dirty)` |
 | **Branch** | `master` |
 | **Status** | ✅ Auto-tracked (cần điền Observations + Conclusion) |
 | **Duration** | <!-- AUTO:duration -->
-2.886h
+2.870h
 <!-- /AUTO --> |
 
 ---
@@ -265,7 +265,7 @@ command:
 ## 4. Execution
 
 ```bash
-python training/forgetmi_loku.py --config config.yaml --fresh --exp baseline_mimic_3per_seed123
+python training/forgetmi_loku.py --config config.yaml --fresh --exp baseline_mimic_3per_seed7
 ```
 
 ---
@@ -283,14 +283,14 @@ python training/forgetmi_loku.py --config config.yaml --fresh --exp baseline_mim
 <!-- AUTO:metrics -->
 | Metric | Value | Δ vs Paper (3%) |
 |---|---|---|
-| MIA_persample ↓ | **0.234** | (LoKU per-sample SVM) |
+| MIA_persample ↓ | **0.398** | (LoKU per-sample SVM) |
 | MIA_paper ↓ | **0.857** | +0.286 ❌ |
 | Forget AUC ↓ | **0.571** | -0.164 ✅ |
 | Forget F1 ↓ | **0.172** | -0.221 ✅ |
 | Test AUC ↑ | **0.651** | +0.026 ✅ |
 | Test F1 ↑ | **0.172** | -0.078 ❌ |
-| 1−CosSim ↓ | **0.380** | -0.070 ✅ |
-| Time (h) | **2.886** | -2.114 ✅ |
+| 1−CosSim ↓ | **0.378** | -0.072 ✅ |
+| Time (h) | **2.870** | -2.130 ✅ |
 | GPU peak (GB) | **8.49** | — |
 | Trainable params | **100.000%** | (vs 100% paper) |
 
