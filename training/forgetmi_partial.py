@@ -120,8 +120,10 @@ def build_dataset(args, tokenizer, image_noise_params=None):
         print(args.reprocess_input_data)
         logger.info("Loading features from cached file %s", cached_features_file)
         print("Loading features from cached file %s"%cached_features_file)
-        features = torch.load(cached_features_file)
-        noisy_features = torch.load(cached_noisy_features_file)
+        # weights_only=False: PyTorch 2.6+ defaults to True, which breaks loading
+        # of pickled InputFeatures objects (custom class). Same fix as forgetmi_loku.py.
+        features = torch.load(cached_features_file, weights_only=False)
+        noisy_features = torch.load(cached_noisy_features_file, weights_only=False)
     else:
         logger.info("Creating features from dataset file at %s", args.text_data_dir)
         label_list = processor.get_labels()
@@ -169,6 +171,18 @@ def build_dataset(args, tokenizer, image_noise_params=None):
     test_img_txt_ids,   test_img_labels   = _filter_valid(test_img_txt_ids,   test_img_labels,   all_txt_tokens,   'test')
     forget_img_txt_ids, forget_img_labels = _filter_valid(forget_img_txt_ids, forget_img_labels, all_txt_tokens,   'forget')
     rand_img_txt_ids,   rand_img_labels   = _filter_valid(rand_img_txt_ids,   rand_img_labels,   noisy_txt_tokens, 'random')
+
+    # Loud error if filter wiped everything (cache totally stale): silent no-op would
+    # otherwise produce a trained-on-nothing model that still passes all eval gates.
+    for name, dct in [('retain', retain_img_txt_ids), ('validation', val_img_txt_ids),
+                      ('test', test_img_txt_ids), ('forget', forget_img_txt_ids),
+                      ('random', rand_img_txt_ids)]:
+        if not dct:
+            raise RuntimeError(
+                f"After filter '{name}' set is EMPTY — cached text features in "
+                f"{args.text_data_dir} don't match study_ids in {args.data_split_path}. "
+                f"Set reprocess_input_data=true or delete the cache files in text_data_dir."
+            )
 
     '''
     Specify the image pre-processing method
@@ -834,6 +848,9 @@ def main():
     print(f"Device: {device}")
     if not torch.cuda.is_available():
         print("⚠️  KHÔNG có GPU — baseline sẽ cực kỳ chậm (~25× chậm hơn)")
+    else:
+        # Reset per-seed so gpu_peak_GB reflects THIS seed, not cumulative across multi-seed runs.
+        torch.cuda.reset_peak_memory_stats()
 
     # ---- Output dir ----
     output_dir = os.path.join(config.output_dir, run_name)
