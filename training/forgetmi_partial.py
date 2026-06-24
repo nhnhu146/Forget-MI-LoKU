@@ -572,44 +572,35 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
             optimizer.step()
             optimizer.zero_grad()  
 
-        # ------------------------------------------- Unlearning evaluation -------------------------------------------
-        # metrics, cached_metrics = evaluate(
-        #     model_og, model_ul, model_re, 
-        #     retain_dataloader, forget_dataloader, val_dataloader, test_dataloader,  
-        #     device, args, cached_metrics, mode='val')  
-            
-        from evaluation.eval_unlearning import get_probability_measure
-
-        # flattened_metrics = flatten_metrics(metrics)
-        cosine_similarity = get_probability_measure(
-            args,
-            copy.deepcopy(model_re).eval(),
-            copy.deepcopy(model_ul).eval(),
-            retain_dataloader,
-            device
-        )
-
-        wandb.log({
-            "Epoch": epoch,
-            "MD Loss": md_loss / steps,
-            "UU Loss": uu_loss / steps,
-            "MKR Loss": mkr_loss / steps,
-            "UKR Loss": ukr_loss / steps,
-            "Total Loss": total_loss / steps,
-            "Learning Rate": args.learning_rate,
-            "Cosine Similarity": cosine_similarity
-            # **flattened_metrics
-        })
+        # Per-epoch cosine eval skipped: (a) only consumed by wandb.log (disabled on Kaggle),
+        # (b) deepcopy(model_re) + deepcopy(model_ul) every epoch wastes ~1GB GPU, (c) model_re
+        # is parked on CPU during training so this would device-mismatch anyway. Final cosine
+        # vs retrained is computed properly in _final_evaluation.
+        try:
+            wandb.log({
+                "Epoch": epoch,
+                "MD Loss": md_loss / steps,
+                "UU Loss": uu_loss / steps,
+                "MKR Loss": mkr_loss / steps,
+                "UKR Loss": ukr_loss / steps,
+                "Total Loss": total_loss / steps,
+                "Learning Rate": args.learning_rate,
+            })
+        except Exception:
+            pass
 
         print(f'Total Loss After epoch {epoch} = {total_loss/steps}')
         print(f"UKR: {ukr_loss / steps}, UU: {uu_loss / steps}, MD: {md_loss / steps}, MKR: {mkr_loss / steps}")
         
-        # ------------------------------------------- Save Unlearning Model -------------------------------------------
-        epoch_output_dir = os.path.join(output_dir, f"epoch_{epoch}")
-        os.makedirs(epoch_output_dir, exist_ok=True)
-        model_to_save = model_ul.module if hasattr(model_ul, 'module') else model_ul
-        # model_to_save.save_pretrained(epoch_output_dir)
-        torch.save(model_to_save.state_dict(), os.path.join(epoch_output_dir, "model_state_dict.pth"))
+        # Only save model state every save_epochs OR last epoch — avoids filling
+        # Kaggle's 20GB /kaggle/working/ cap (30 × 450MB checkpoints = 13.5GB).
+        save_every = int(getattr(args, 'save_epochs', 5))
+        is_last_epoch = (epoch + 1) == n_epochs
+        if (epoch + 1) % save_every == 0 or is_last_epoch:
+            epoch_output_dir = os.path.join(output_dir, f"epoch_{epoch}")
+            os.makedirs(epoch_output_dir, exist_ok=True)
+            model_to_save = model_ul.module if hasattr(model_ul, 'module') else model_ul
+            torch.save(model_to_save.state_dict(), os.path.join(epoch_output_dir, "model_state_dict.pth"))
 
 
     # ------------------------------------------- Log Unlearning Time Taken -------------------------------------------    
