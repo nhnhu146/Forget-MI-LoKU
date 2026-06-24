@@ -152,8 +152,26 @@ def build_dataset(args, tokenizer, image_noise_params=None):
     retain_img_labels, retain_img_txt_ids, val_img_labels, val_img_txt_ids, test_img_labels, test_img_txt_ids, rand_img_labels, rand_img_txt_ids, \
         forget_img_labels, forget_img_txt_ids, n_retain, n_val, n_test, n_rand, n_forget = data_split(args.data_split_path, args.forget_set_path, args.random_point_ratio, args.validation_ratio)
 
+    # Drop items whose study_id has no cached text features (else KeyError mid-DataLoader).
+    # Same root cause + fix as forgetmi_loku.py build_dataset.
+    def _filter_valid(ids_dict, labels_dict, txt_map, name):
+        valid = []
+        for d, r in ids_dict.items():
+            if r in txt_map or f"s{r}" in txt_map or str(r).replace('s', '') in txt_map:
+                valid.append(d)
+        skipped = len(ids_dict) - len(valid)
+        if skipped > 0:
+            print(f"WARNING: {skipped}/{len(ids_dict)} items in '{name}' set skipped (text features missing in cache)")
+        return {d: ids_dict[d] for d in valid}, {d: labels_dict[d] for d in valid}
+
+    retain_img_txt_ids, retain_img_labels = _filter_valid(retain_img_txt_ids, retain_img_labels, all_txt_tokens,   'retain')
+    val_img_txt_ids,    val_img_labels    = _filter_valid(val_img_txt_ids,    val_img_labels,    all_txt_tokens,   'validation')
+    test_img_txt_ids,   test_img_labels   = _filter_valid(test_img_txt_ids,   test_img_labels,   all_txt_tokens,   'test')
+    forget_img_txt_ids, forget_img_labels = _filter_valid(forget_img_txt_ids, forget_img_labels, all_txt_tokens,   'forget')
+    rand_img_txt_ids,   rand_img_labels   = _filter_valid(rand_img_txt_ids,   rand_img_labels,   noisy_txt_tokens, 'random')
+
     '''
-    Specify the image pre-processing method 
+    Specify the image pre-processing method
     depending on it's for training/evaluation
     '''
     if args.do_train:
