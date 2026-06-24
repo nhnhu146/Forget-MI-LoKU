@@ -803,7 +803,10 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
     print("─" * 60)
 
     # CSV summary (cùng format LoKU để Cell 5 notebook gộp được)
-    csv_path = os.path.join(output_dir, "..", "results_summary.csv")
+    # Save CSV at the PARENT of output_dir's parent → e.g. /kaggle/working/results_summary.csv
+    # (not inside baseline_output/). This matches Cell 1's restore path and Cell 6's push path
+    # in run_kaggle_baseline.ipynb, so the multi-seed checkpoint loop sees the same CSV.
+    csv_path = os.path.join(output_dir, "..", "..", "results_summary.csv")
     csv_path = os.path.normpath(csv_path)
     # 'id' added 2026-06-18 — same fix as forgetmi_loku.py: notebooks filter by id
     # to detect completed configs. Without it, sweep/multi-seed re-runs everything.
