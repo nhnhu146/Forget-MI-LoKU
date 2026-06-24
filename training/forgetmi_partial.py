@@ -549,10 +549,23 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
             optimizer.step()
             optimizer.zero_grad()  
 
-        # Per-epoch cosine eval skipped: (a) only consumed by wandb.log (disabled on Kaggle),
-        # (b) deepcopy(model_re) + deepcopy(model_ul) every epoch wastes ~1GB GPU, (c) model_re
-        # is parked on CPU during training so this would device-mismatch anyway. Final cosine
-        # vs retrained is computed properly in _final_evaluation.
+        # ----- Per-epoch CosSim eval (FAITHFUL to original Forget-MI implementation) -----
+        # Runs FULL retain forward through model_ul AND model_re each epoch — this is the
+        # primary contributor to the paper's reported ~5h training time per seed. We keep
+        # it (despite being expensive) to reproduce the published baseline runtime profile.
+        from evaluation.eval_unlearning import get_probability_measure
+        try:
+            cosine_similarity = get_probability_measure(
+                args,
+                copy.deepcopy(model_re).eval(),
+                copy.deepcopy(model_ul).eval(),
+                retain_dataloader,
+                device
+            )
+        except Exception as e:
+            print(f"⚠️  per-epoch CosSim eval failed at epoch {epoch}: {e}")
+            cosine_similarity = float('nan')
+
         try:
             wandb.log({
                 "Epoch": epoch,
@@ -562,6 +575,7 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
                 "UKR Loss": ukr_loss / steps,
                 "Total Loss": total_loss / steps,
                 "Learning Rate": args.learning_rate,
+                "Cosine Similarity": cosine_similarity,
             })
         except Exception:
             pass
@@ -571,17 +585,15 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
         print(f"[E{epoch:02d}/{n_epochs}] loss={total_loss/steps:+.3f} "
               f"UKR={ukr_loss/steps:+.3f} UU={uu_loss/steps:+.3f} "
               f"MD={md_loss/steps:+.3f} MKR={mkr_loss/steps:+.3f} "
-              f"| elapsed={elapsed_min:.1f}m ETA={eta_min:.1f}m")
-        
-        # Only save model state every save_epochs OR last epoch — avoids filling
-        # Kaggle's 20GB /kaggle/working/ cap (30 × 450MB checkpoints = 13.5GB).
-        save_every = int(getattr(args, 'save_epochs', 5))
-        is_last_epoch = (epoch + 1) == n_epochs
-        if (epoch + 1) % save_every == 0 or is_last_epoch:
-            epoch_output_dir = os.path.join(output_dir, f"epoch_{epoch}")
-            os.makedirs(epoch_output_dir, exist_ok=True)
-            model_to_save = model_ul.module if hasattr(model_ul, 'module') else model_ul
-            torch.save(model_to_save.state_dict(), os.path.join(epoch_output_dir, "model_state_dict.pth"))
+              f"CosSim={cosine_similarity:+.4f} | elapsed={elapsed_min:.1f}m ETA={eta_min:.1f}m")
+
+        # ----- Per-epoch checkpoint save (FAITHFUL to original) -----
+        # Original saves every epoch. ~450 MB × 30 = ~13.5 GB on /kaggle/working/.
+        # Tight against 20 GB cap but fits; matches paper behavior.
+        epoch_output_dir = os.path.join(output_dir, f"epoch_{epoch}")
+        os.makedirs(epoch_output_dir, exist_ok=True)
+        model_to_save = model_ul.module if hasattr(model_ul, 'module') else model_ul
+        torch.save(model_to_save.state_dict(), os.path.join(epoch_output_dir, "model_state_dict.pth"))
 
 
     # ------------------------------------------- Log Unlearning Time Taken -------------------------------------------    
@@ -702,12 +714,6 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
     for p in model_unlearn.parameters():
         p.requires_grad = False
     torch.cuda.empty_cache()
-
-    # Bring model_retrained back to GPU for CosSim (was kept on CPU during training to save memory).
-    try:
-        model_retrained.to(device)
-    except Exception as e:
-        print(f"⚠️  Could not move model_retrained to {device} ({e}); leaving on CPU.")
 
     eval_max_retain = int(getattr(config, 'eval_max_retain', 512))
     bs = int(getattr(config, 'eval_batch_size', 16))
@@ -920,10 +926,9 @@ def main():
     print(f"📦 Loading models...")
     model_og = ImageTextModel.from_pretrained(config.base_model_path).to(device)
     model_unlearn = copy.deepcopy(model_og)
-    # Keep model_retrained on CPU during training (only used at eval for CosSim).
-    # Saves ~450 MB GPU during the OOM-tight training phase; moved back to device
-    # inside _final_evaluation.
-    model_retrained = ImageTextModel.from_pretrained(config.retrained_model_path)
+    # Keep model_retrained on GPU as in original paper code — per-epoch CosSim eval
+    # depends on it residing on the same device as model_ul.
+    model_retrained = ImageTextModel.from_pretrained(config.retrained_model_path).to(device)
 
     tokenizer = BertTokenizer.from_pretrained(config.bert_pretrained_dir)
 
