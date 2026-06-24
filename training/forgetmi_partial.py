@@ -443,7 +443,9 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
 
     model_re.eval()
     model_ul.train()
-    model_og.train()
+    # Frozen + eval: prevents BN/dropout drift, and the no_grad blocks below kill
+    # the autograd graph for og forwards (the main T4 OOM source — ~5-6 GB saved).
+    model_og.eval()
 
     unlearning_start_time = time.time()
 
@@ -463,23 +465,30 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
         steps = 0
         for (forget_batch, rand_batch, retain_batch) in epoch_iterator:
             # ------------------------------------------- GET INPUTS FROM ORIGINAL AND UNLEARNING MODELS -------------------------------------------
+            # model_og is FROZEN — wrap in no_grad so autograd doesn't build a graph
+            # for activations (which it would otherwise hold until backward). This is
+            # the dominant T4 OOM saver (~5-6 GB). Loss targets don't need a grad path
+            # through the frozen model.
             retain_batch = tuple(t.to(device=device, non_blocking=True) for t in retain_batch)
             retain_inputs, retain_labels, retain_report_id = get_model_inputs(args, retain_batch, device)
-            original_retain_outputs = model_og(**retain_inputs)
+            with torch.no_grad():
+                original_retain_outputs = model_og(**retain_inputs)
             og_ret_img_emb, og_ret_img_log, og_ret_txt_emb, og_ret_txt_log = original_retain_outputs[:4]
             unlearn_retain_outputs = model_ul(**retain_inputs)
             ul_ret_img_emb, ul_ret_img_log, ul_ret_txt_emb, ul_ret_txt_log = unlearn_retain_outputs[:4]
-            
+
             rand_batch = tuple(t.to(device=device, non_blocking=True) for t in rand_batch)
             rand_inputs, rand_labels, rand_report_id = get_model_inputs(args, rand_batch, device)
-            original_rand_outputs = model_og(**rand_inputs)
+            with torch.no_grad():
+                original_rand_outputs = model_og(**rand_inputs)
             unlearn_rand_outputs = model_ul(**rand_inputs)
             og_rand_img_emb, og_rand_img_log, og_rand_txt_emb, og_rand_txt_log = original_rand_outputs[:4]
             ul_rand_img_emb, ul_rand_img_log, ul_rand_txt_emb, ul_rand_txt_log = unlearn_rand_outputs[:4]
-            
+
             forget_batch = tuple(t.to(device=device, non_blocking=True) for t in forget_batch)
             forget_inputs, forget_labels, forget_report_id = get_model_inputs(args, forget_batch, device)
-            original_forget_outputs = model_og(**forget_inputs)
+            with torch.no_grad():
+                original_forget_outputs = model_og(**forget_inputs)
             unlearn_forget_outputs = model_ul(**forget_inputs)
             ul_frgt_img_emb, ul_frgt_img_log, ul_frgt_txt_emb, ul_frgt_txt_log = unlearn_forget_outputs[:4]
             og_frgt_img_emb, og_frgt_img_log, og_frgt_txt_emb, og_frgt_txt_log = original_forget_outputs[:4]
@@ -720,6 +729,12 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
         p.requires_grad = False
     torch.cuda.empty_cache()
 
+    # Bring model_retrained back to GPU for CosSim (was kept on CPU during training to save memory).
+    try:
+        model_retrained.to(device)
+    except Exception as e:
+        print(f"⚠️  Could not move model_retrained to {device} ({e}); leaving on CPU.")
+
     eval_max_retain = int(getattr(config, 'eval_max_retain', 512))
     bs = int(getattr(config, 'eval_batch_size', 16))
     paper_bs = int(getattr(config, 'mia_paper_batch_size', 32))
@@ -931,7 +946,10 @@ def main():
     print(f"📦 Loading models...")
     model_og = ImageTextModel.from_pretrained(config.base_model_path).to(device)
     model_unlearn = copy.deepcopy(model_og)
-    model_retrained = ImageTextModel.from_pretrained(config.retrained_model_path).to(device)
+    # Keep model_retrained on CPU during training (only used at eval for CosSim).
+    # Saves ~450 MB GPU during the OOM-tight training phase; moved back to device
+    # inside _final_evaluation.
+    model_retrained = ImageTextModel.from_pretrained(config.retrained_model_path)
 
     tokenizer = BertTokenizer.from_pretrained(config.bert_pretrained_dir)
 
