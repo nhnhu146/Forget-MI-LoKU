@@ -80,7 +80,7 @@ parameters:
   use_noise:
     value: false                                             # paper "Unimodal" setting
   learning_rate:
-    value: 1.0e-4                                            # paper baseline lr
+    value: 1.0e-5                                            # paper Section 3 mentions both 1e-4 and 1e-5 — using 1e-5 (lower) to avoid over-forgetting on subset 3%
   weight_decay:
     value: 0.01
   unlearn_epochs:
