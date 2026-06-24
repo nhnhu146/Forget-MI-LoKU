@@ -991,6 +991,25 @@ def main():
     _final_evaluation(config, output_dir, device, model_unlearn, model_retrained,
                       dataset, elapsed_h, trainable, total_params, tracker=tracker)
 
+    # ---- Post-eval cleanup ----
+    # Per-epoch checkpoints (~450MB × 30 = 13.5GB) would otherwise fill Kaggle's 20GB
+    # /kaggle/working/ cap across multi-seed runs. Final metrics already in CSV +
+    # tracker MD; only the LAST epoch's checkpoint is kept for audit/reload.
+    # Environment-required fix — does NOT affect training, eval, or reported numbers.
+    try:
+        import glob as _glob, shutil as _shutil
+        epoch_dirs = sorted(_glob.glob(os.path.join(output_dir, "epoch_*")),
+                            key=lambda p: int(os.path.basename(p).split('_')[1]))
+        for ep_dir in epoch_dirs[:-1]:                # keep last
+            try:
+                _shutil.rmtree(ep_dir)
+            except Exception:
+                pass
+        if epoch_dirs:
+            print(f"🧹 Cleaned {len(epoch_dirs)-1} per-epoch checkpoints (kept last: {os.path.basename(epoch_dirs[-1])})")
+    except Exception as e:
+        print(f"⚠️  Per-epoch cleanup failed ({e}); manual cleanup may be needed.")
+
     try:
         wandb.finish()
     except Exception:
