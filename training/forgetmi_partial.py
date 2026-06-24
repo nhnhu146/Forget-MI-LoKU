@@ -154,9 +154,7 @@ def build_dataset(args, tokenizer, image_noise_params=None):
         return n, len(csv_ids), list(cache_keys)[:5], csv_ids[:5]
 
     if os.path.exists(cached_features_file) and os.path.exists(cached_noisy_features_file) and not args.reprocess_input_data:
-        print(args.reprocess_input_data)
         logger.info("Loading features from cached file %s", cached_features_file)
-        print("Loading features from cached file %s"%cached_features_file)
         # weights_only=False: PyTorch 2.6+ defaults to True, which breaks loading
         # of pickled InputFeatures objects (custom class). Same fix as forgetmi_loku.py.
         features = torch.load(cached_features_file, weights_only=False)
@@ -284,9 +282,7 @@ def build_dataset(args, tokenizer, image_noise_params=None):
                                 val_img_labels, dataset_split_path=args.data_split_path, transform=xray_transform, 
                                 output_channel_encoding=args.output_channel_encoding)
                       
-    print("Length of the retaining dataset is ", len(retain_dataset))
-    print("Length of the random dataset is ", len(rand_dataset))
-    print("Length of the forget dataset is ", len(forget_dataset))
+    print(f"Datasets: retain={len(retain_dataset)} val={len(val_dataset)} test={len(test_dataset)} forget={len(forget_dataset)} random={len(rand_dataset)}")
 
     dataset = {
         'retain': retain_dataset,
@@ -306,9 +302,6 @@ def data_split(split_list_path, forget_ids_path, rand_ratio, validation_ratio=0.
 
     random.seed(0)
 
-    print('Data split list being used: ', split_list_path)
-    print('Forget list being used: ', forget_ids_path)
-
     train_labels = {}
     train_img_txt_ids = {}
     test_labels = {}
@@ -325,17 +318,14 @@ def data_split(split_list_path, forget_ids_path, rand_ratio, validation_ratio=0.
 
         train_label_file_reader = csv.reader(train_label_file)
         header = next(train_label_file_reader)
-        print("Header skipped:", header)
 
         for row in train_label_file_reader:
             if row == header or row[3] == 'edeme_severity':
-                print(f"Skipping repeated header or invalid row: {row}")
                 continue
             try:
-                severity = float(row[3])  # Convert severity to float
+                severity = float(row[3])
             except ValueError:
-                print(f"Skipping non-numeric row: {row}")
-                continue  # Skip invalid rows
+                continue
             if row[0] in forget_ids:
                 forget_labels[row[2]] = [severity]
                 forget_img_txt_ids[row[2]] = row[1]
@@ -370,16 +360,7 @@ def data_split(split_list_path, forget_ids_path, rand_ratio, validation_ratio=0.
 
     n_train, n_val, n_rand, n_test, n_forget = len(train_img_txt_ids), len(val_img_txt_ids), len(rand_img_txt_ids), len(test_img_txt_ids), len(forget_img_txt_ids)
 
-    print("Total number of training labels: ", len(train_labels))
-    print("Total number of training DICOM IDs: ", len(train_img_txt_ids))
-    print("Total number of validation labels: ", len(val_labels))
-    print("Total number of validation DICOM IDs: ", len(val_img_txt_ids))
-    print("Total number of testing labels: ", len(test_labels))
-    print("Total number of testing DICOM IDs: ", len(test_img_txt_ids))
-    print("Total number of unlearning labels: ", len(forget_labels))
-    print("Total number of unlearning DICOM IDs: ", len(forget_img_txt_ids))
-    print("Total number of random labels: ", len(rand_labels))
-    print("Total number of random DICOM IDs: ", len(rand_img_txt_ids))
+    print(f"Split: train={len(train_labels)} val={len(val_labels)} test={len(test_labels)} forget={len(forget_labels)} random={len(rand_labels)}")
 
     return train_labels, train_img_txt_ids, val_labels, val_img_txt_ids, test_labels, test_img_txt_ids, rand_labels, rand_img_txt_ids, forget_labels, forget_img_txt_ids, n_train, n_val, n_test, n_rand, n_forget
 
@@ -417,29 +398,25 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
 
     aligned_sampler = AlignedSampler(len(forget_set), shuffle=True, seed=42)
 
-    print('Retrieving forget set data of length ', len(forget_set))
-    forget_dataloader = DataLoader(forget_set, sampler=aligned_sampler, 
+    forget_dataloader = DataLoader(forget_set, sampler=aligned_sampler,
                                   batch_size=args.unlearn_batch_size,
-                                  num_workers=args.num_cpu_workers, 
+                                  num_workers=args.num_cpu_workers,
                                   pin_memory=True)
-
-    print('Retrieving validation set data of length ', len(val_set))
-    val_dataloader = DataLoader(val_set, sampler=SequentialSampler(val_set), 
+    val_dataloader = DataLoader(val_set, sampler=SequentialSampler(val_set),
                                 batch_size=args.eval_batch_size, num_workers=args.num_cpu_workers, pin_memory=True)
-
-    print('Retrieving random set data of length ', len(rand_set))
-    rand_dataloader = DataLoader(rand_set, sampler=aligned_sampler, 
+    rand_dataloader = DataLoader(rand_set, sampler=aligned_sampler,
                                   batch_size=args.unlearn_batch_size,
-                                  num_workers=args.num_cpu_workers, 
+                                  num_workers=args.num_cpu_workers,
                                   pin_memory=True)
-    
-    print('Retrieving test set data of length ', len(test_set))
     test_dataloader = DataLoader(test_set, sampler=SequentialSampler(test_set),
                                   batch_size=args.eval_batch_size, num_workers=args.num_cpu_workers, pin_memory=True)
+    print(f"Dataloaders: forget={len(forget_set)} val={len(val_set)} rand={len(rand_set)} test={len(test_set)} (batch={args.unlearn_batch_size})")
 
     print('Starting the Unlearning Process...')
     n_epochs = args.unlearn_epochs
-    unlearning_iterator = trange(int(n_epochs), desc="Epoch")
+    # disable=True: in non-TTY (Kaggle .log) tqdm spams a new line per iter; we print
+    # one summary line per epoch below instead.
+    unlearning_iterator = trange(int(n_epochs), desc="Epoch", disable=True)
 
     model_re.eval()
     model_ul.train()
@@ -455,12 +432,12 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
         md_loss, uu_loss = 0, 0
         mkr_loss, ukr_loss = 0, 0
 
-        print('Retrieving retain set data of length ', len(retain_set))
         retain_sampler = RandomSampler(retain_set)
         retain_dataloader = DataLoader(retain_set, sampler=retain_sampler, batch_size=args.unlearn_batch_size,
                                     num_workers=args.num_cpu_workers, pin_memory=True)
-
-        epoch_iterator = tqdm(zip(forget_dataloader, rand_dataloader, retain_dataloader), desc="Retain Set Iteration")
+        # Same reason as outer trange: disable progress spam in non-TTY.
+        epoch_iterator = tqdm(zip(forget_dataloader, rand_dataloader, retain_dataloader),
+                              desc="Retain Set Iteration", disable=True)
 
         steps = 0
         for (forget_batch, rand_batch, retain_batch) in epoch_iterator:
@@ -589,8 +566,12 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
         except Exception:
             pass
 
-        print(f'Total Loss After epoch {epoch} = {total_loss/steps}')
-        print(f"UKR: {ukr_loss / steps}, UU: {uu_loss / steps}, MD: {md_loss / steps}, MKR: {mkr_loss / steps}")
+        elapsed_min = (time.time() - unlearning_start_time) / 60
+        eta_min = elapsed_min / (epoch + 1) * (n_epochs - epoch - 1)
+        print(f"[E{epoch:02d}/{n_epochs}] loss={total_loss/steps:+.3f} "
+              f"UKR={ukr_loss/steps:+.3f} UU={uu_loss/steps:+.3f} "
+              f"MD={md_loss/steps:+.3f} MKR={mkr_loss/steps:+.3f} "
+              f"| elapsed={elapsed_min:.1f}m ETA={eta_min:.1f}m")
         
         # Only save model state every save_epochs OR last epoch — avoids filling
         # Kaggle's 20GB /kaggle/working/ cap (30 × 450MB checkpoints = 13.5GB).
