@@ -110,12 +110,49 @@ def build_dataset(args, tokenizer, image_noise_params=None):
         get_features = convert_examples_to_features_multilabel
     else:
         get_features = convert_examples_to_features
-    cached_features_file = os.path.join(
-        args.text_data_dir,
-        f"cachedfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}")
-    cached_noisy_features_file = os.path.join(
-        args.text_data_dir,
-        f"cachednoisyfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}")
+    cache_fname = f"cachedfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}"
+    cache_noisy_fname = f"cachednoisyfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}"
+    cached_features_file = os.path.join(args.text_data_dir, cache_fname)
+    cached_noisy_features_file = os.path.join(args.text_data_dir, cache_noisy_fname)
+
+    def _regen_to(dst_dir):
+        """Build features fresh from all_data.tsv and write to dst_dir.
+        Raises FileNotFoundError if source tsv missing."""
+        src_tsv = os.path.join(args.text_data_dir, 'all_data.tsv')
+        if not os.path.exists(src_tsv):
+            raise FileNotFoundError(
+                f"Cannot regenerate cache: {src_tsv} missing. Upload it to the Kaggle "
+                f"dataset (folder 'metadata/') or run with a populated text_data_dir."
+            )
+        os.makedirs(dst_dir, exist_ok=True)
+        label_list = processor.get_labels()
+        synonyms_df = pd.read_csv(args.synonyms_dir)
+        examples = processor.get_all_examples(args.text_data_dir)
+        noisy_examples = processor.get_noisy_examples(args.text_data_dir, synonyms_df, args.text_noise_level)
+        feats = get_features(examples, label_list, args.max_seq_length, tokenizer)
+        feats_n = get_features(noisy_examples, label_list, args.max_seq_length, tokenizer)
+        torch.save(feats, os.path.join(dst_dir, cache_fname))
+        torch.save(feats_n, os.path.join(dst_dir, cache_noisy_fname))
+        return feats, feats_n
+
+    def _probe_match(feats):
+        """Sample 50 study_ids from split CSV, check how many resolve in cache keys.
+        Returns (n_match, n_total, sample_cache_keys, sample_csv_ids)."""
+        cache_keys = set()
+        for f in feats[:2000]:
+            cache_keys.add(f.report_id)
+        csv_ids = []
+        with open(args.data_split_path, 'r') as fp:
+            rdr = csv.reader(fp); next(rdr, None)
+            for row in rdr:
+                if len(row) > 1:
+                    csv_ids.append(row[1])
+                if len(csv_ids) >= 50:
+                    break
+        n = sum(1 for r in csv_ids
+                if r in cache_keys or f"s{r}" in cache_keys or str(r).replace('s', '') in cache_keys)
+        return n, len(csv_ids), list(cache_keys)[:5], csv_ids[:5]
+
     if os.path.exists(cached_features_file) and os.path.exists(cached_noisy_features_file) and not args.reprocess_input_data:
         print(args.reprocess_input_data)
         logger.info("Loading features from cached file %s", cached_features_file)
@@ -124,22 +161,43 @@ def build_dataset(args, tokenizer, image_noise_params=None):
         # of pickled InputFeatures objects (custom class). Same fix as forgetmi_loku.py.
         features = torch.load(cached_features_file, weights_only=False)
         noisy_features = torch.load(cached_noisy_features_file, weights_only=False)
+
+        # Cache integrity probe. If keys don't match split CSV at all, the
+        # downstream filter will wipe everything → useless training run.
+        # Detect early + try regenerating to a writable dir (Kaggle input is read-only).
+        n_match, n_total, sample_cache, sample_csv = _probe_match(features)
+        if n_match == 0 and n_total > 0:
+            print(f"⚠️  Cache 0/{n_total} match split CSV — STALE.")
+            print(f"   sample cache keys : {sample_cache}")
+            print(f"   sample split ids  : {sample_csv}")
+            writable = '/kaggle/working/text_cache_regen' if os.path.isdir('/kaggle/working') else os.path.join(os.getcwd(), 'text_cache_regen')
+            re_cached = os.path.join(writable, cache_fname)
+            re_cached_noisy = os.path.join(writable, cache_noisy_fname)
+            if os.path.exists(re_cached) and os.path.exists(re_cached_noisy):
+                print(f"   ↳ found prior regen cache → loading {writable}")
+                features = torch.load(re_cached, weights_only=False)
+                noisy_features = torch.load(re_cached_noisy, weights_only=False)
+            else:
+                print(f"   ↳ regenerating to {writable} (1-time, ~5 min)...")
+                features, noisy_features = _regen_to(writable)
+                print(f"   ✅ Regenerated. Subsequent runs in this session will reuse {writable}.")
+            n_match2, _, sc2, ci2 = _probe_match(features)
+            if n_match2 == 0:
+                raise RuntimeError(
+                    f"After regenerate STILL 0 match. Cache: {sc2} vs split: {ci2}. "
+                    f"Likely all_data.tsv is from a different MIMIC subset than {args.data_split_path}."
+                )
+            print(f"   ✅ Post-regen probe: {n_match2}/{n_total} match.")
     else:
         logger.info("Creating features from dataset file at %s", args.text_data_dir)
-        label_list = processor.get_labels()
-
-        synonyms_df = pd.read_csv(args.synonyms_dir)
-        text_noise_level = args.text_noise_level
-        examples = processor.get_all_examples(args.text_data_dir)
-        noisy_examples = processor.get_noisy_examples(args.text_data_dir, synonyms_df, text_noise_level)
-
-        features = get_features(examples, label_list, args.max_seq_length, tokenizer)
-        noisy_features = get_features(noisy_examples, label_list, args.max_seq_length, tokenizer)
-
-        logger.info("Saving features into cached file %s", cached_features_file)
-        print("Saving features into cached file %s"%cached_features_file)
-        torch.save(features, cached_features_file)
-        torch.save(noisy_features, cached_noisy_features_file)
+        # Try writing back to text_data_dir; fall back to /kaggle/working if read-only.
+        try:
+            features, noisy_features = _regen_to(args.text_data_dir)
+            print(f"Saving features into cached file {cached_features_file}")
+        except (PermissionError, OSError):
+            writable = '/kaggle/working/text_cache_regen' if os.path.isdir('/kaggle/working') else os.path.join(os.getcwd(), 'text_cache_regen')
+            print(f"⚠️  text_data_dir read-only → regenerating to {writable}")
+            features, noisy_features = _regen_to(writable)
 
     all_txt_tokens = {f.report_id: f.input_ids for f in features}
     all_txt_masks = {f.report_id: f.input_mask for f in features}
