@@ -588,10 +588,12 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
     unlearning_end_time = time.time()  
     unlearning_duration = (unlearning_end_time - unlearning_start_time) / 3600
 
-    wandb.log({
-        "time(hours)": unlearning_duration
-    })
-    
+    try:
+        wandb.log({"time(hours)": unlearning_duration})
+    except Exception:
+        pass
+    print(f"⏱  Unlearning training done in {unlearning_duration*60:.1f} min ({unlearning_duration:.2f}h)")
+
     return retain_dataloader, forget_dataloader, val_dataloader, test_dataloader
     
 def _parse_cli():
