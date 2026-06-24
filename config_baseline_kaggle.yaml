@@ -90,9 +90,9 @@ parameters:
   warmup_proportion:
     value: 0.1
   unlearn_batch_size:
-    value: 16
+    value: 8                                                 # giảm 16→8 cho T4 OOM (full FT 113M)
   eval_batch_size:
-    value: 16
+    value: 8                                                 # giảm 16→8: eval MIA forward full retain cũng nặng
   eval_max_retain:
     value: 512                                               # cap retain forwards in eval
   mia_paper_batch_size:

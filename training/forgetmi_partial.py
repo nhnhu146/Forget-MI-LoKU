@@ -961,6 +961,17 @@ def main():
     total_params = sum(p.numel() for p in model_unlearn.parameters())
     print(f"📊 Trainable: {trainable:,} / {total_params:,} ({100*trainable/total_params:.3f}%) — baseline full FT")
 
+    # Gradient checkpointing on the BERT side of model_unlearn: trades ~20% slowdown
+    # for ~30-40% less activation memory. Essential to fit baseline (113M trainable +
+    # 3 stacked forwards) on a 14.5 GB T4 without dropping batch size further.
+    try:
+        model_unlearn.text_model.bert.gradient_checkpointing_enable()
+        # use_cache must be off for grad-checkpointing — HF prints a noisy warning otherwise.
+        model_unlearn.text_model.bert.config.use_cache = False
+        print("✅ Gradient checkpointing enabled on model_unlearn.text_model.bert")
+    except Exception as e:
+        print(f"⚠️  Gradient checkpointing not enabled ({e}) — may OOM at batch_size > 8")
+
     # ---- Optimizer ----
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     param_optimizer = list(model_unlearn.named_parameters())
