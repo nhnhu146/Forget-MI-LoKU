@@ -26,25 +26,26 @@ parameters:
   wandb_entity:
     value: null
 
-  # ===== Data paths (IU on Kaggle) =====
+  # ===== Data paths (IU on Kaggle — new format /datasets/<user>/) =====
+  # Notebook Cell 2 auto-detect + override paths này.
   base_model_path:
-    value: "/kaggle/input/forget-mi-models-iu/model_og_IU"
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-models-iu/base_model/model_og_IU"
   retrained_model_path:
-    value: "/kaggle/input/forget-mi-models-iu/model_retrained_iu_3per"
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-models-iu/retrained_model/model_retrained_iu_3per"
   bert_pretrained_dir:
-    value: "/kaggle/input/forget-mi-models-iu/model_og_IU"
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-models-iu/base_model/model_og_IU"
   text_data_dir:
-    value: "/kaggle/input/forget-mi-data-iu/metadata"
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-data-iu/data/metadata"
   img_data_dir:
-    value: "/kaggle/input/forget-mi-data-iu/img_data"
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-data-iu/data/img_data"
   data_split_path:
-    value: "./data_iu/splits/train_test_split_iu.csv"
+    value: "./data_iu/data_splits/iu-split.csv"
   synonyms_dir:
-    value: "./data_splits/Synonyms.csv"                      # tái sử dụng synonyms MIMIC
+    value: "./data_splits/Synonyms.csv"                      # reuse MIMIC synonyms
   forget_set_path:
-    value: "./data_iu/splits/forget_set_3per_iu.csv"         # override qua CLI cho 6%/10%
+    value: "./data_iu/data_splits/forget_set_3per_iu.csv"    # override qua CLI cho 6%/10%
   output_dir:
-    value: "/kaggle/working/baseline_output"
+    value: "/kaggle/working/baseline_iu_output"
 
   # ===== Dataset prep =====
   max_seq_length:
@@ -74,11 +75,11 @@ parameters:
   use_noise:
     value: false
   learning_rate:
-    value: 1.0e-4
+    value: 1.0e-5                                            # khớp MIMIC (paper validated value)
   weight_decay:
     value: 0.01
   unlearn_epochs:
-    value: 20                                                # giảm từ 30 vì IU nhỏ hơn
+    value: 30                                                # khớp MIMIC để fair comparison
   scheduler:
     value: "ReduceLROnPlateau"
   warmup_proportion:
