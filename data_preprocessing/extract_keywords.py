@@ -52,15 +52,13 @@ def add_limited_noise(text, keywords, max_removals=2):
     """
     # Check which keywords exist in the text
     existing_keywords = [word for word, _ in keywords if re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE)]
-    print("\n Existing Keywords:", existing_keywords)
-    
+
     # If no keywords are found, return the text as-is
     if not existing_keywords:
         return text
-    
+
     # Randomly select up to `max_removals` keywords to remove
     keywords_to_remove = random.sample(existing_keywords, min(len(existing_keywords), max_removals))
-    print("\n Keywords to Remove:", keywords_to_remove)
     
     # Create a regex pattern for the selected keywords
     pattern = r"\b(" + "|".join(re.escape(word) for word in keywords_to_remove) + r")\b"
