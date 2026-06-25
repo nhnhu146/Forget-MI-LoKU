@@ -94,8 +94,11 @@ def main():
     for _, row in proj_df.iterrows():
         rid = str(row[rid_col_p])
         fname = str(row[fname_col])
-        # Strip extension for image_id (Forget-MI uses dicom_id WITHOUT .png)
-        img_id = re.sub(r'\.(png|jpg|jpeg)$', '', fname, flags=re.IGNORECASE)
+        # Strip extension. raddar files: '349_IM-1697-2001.dcm.png' → '349_IM-1697-2001.dcm'
+        # (keep .dcm part because actual filename uses it; downstream make script
+        # appends .png when copying/symlinking)
+        img_id = re.sub(r'\.png$', '', fname, flags=re.IGNORECASE)
+        img_id = re.sub(r'\.(jpg|jpeg)$', '', img_id, flags=re.IGNORECASE)
         img_per_report[rid].append(img_id)
     print(f"\n📊 Images grouped per report: {len(img_per_report)} reports have ≥1 image")
 
