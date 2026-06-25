@@ -1,0 +1,211 @@
+# ============================================================================
+# CONFIG cho Forget-MI LoKU trên Kaggle
+# ============================================================================
+# Copy của config.yaml, chỉ đổi paths sang Kaggle mount + output_dir Kaggle.
+# Mọi hyperparameter (LoRA, IHL, FILA, distill, lr, epochs...) GIỮ NGUYÊN
+# như config.yaml gốc → kết quả Kaggle so sánh trực tiếp được với Colab.
+#
+# Cách chạy (trong notebook Kaggle):
+#   !PYTHONPATH=. WANDB_MODE=disabled python training/forgetmi_loku.py \
+#       --config config_loku_kaggle.yaml --seed 42 \
+#       --override "forget_set_path=./data_splits/forget_set_3per.csv,id=loku_3per" \
+#       --exp final_ihl075_3per_seed42 --hypothesis "exp11 honest 3% IHL=0.75"
+# ============================================================================
+program: training/forgetmi_loku.py
+method: random
+parameters:
+  # ===== WandB (disabled trên Kaggle qua env WANDB_MODE=disabled) =====
+  project:
+    value: "forget_mi_loku"
+  entity:
+    value: null
+
+  # ===== Data paths (KAGGLE: format mới /datasets/<user>/) =====
+  # Notebook Cell 2 sẽ auto-detect và override nếu paths khác.
+  base_model_path:
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-models/base_model/training_original_model"
+  retrained_model_path:
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-models/retrained_model/model_retrained_3per"
+  bert_pretrained_dir:
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-models/base_model/training_original_model"
+  text_data_dir:
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-data/data/metadata"
+  img_data_dir:
+    value: "/kaggle/input/datasets/nhnhu146/forget-mi-data/data/img_data"
+  data_split_path:
+    value: "./data_splits/mimic-cxr-sub-img-edema-split-manualtest.csv"
+  synonyms_dir:
+    value: "./data_splits/Synonyms.csv"
+  forget_set_path:
+    value: "./data_splits/forget_set_3per.csv"
+  output_dir:
+    value: "/kaggle/working/unlearning_output"
+
+  # ===== Dataset prep =====
+  max_seq_length:
+    value: 320
+  text_noise_level:
+    value: 0.5
+  output_channel_encoding:
+    value: "multiclass"
+  reprocess_input_data:
+    value: false
+  validation_ratio:
+    value: 0.1
+  random_point_ratio:
+    value: 0.1
+  random_seed:
+    value: 42
+  id:
+    value: "loku_3per"
+
+  # ===== Training =====
+  do_train:
+    value: true
+  do_eval:
+    value: false
+  overwrite_output_dir:
+    value: true
+  use_noise:
+    value: false
+  learning_rate:
+    value: 5.0e-4
+  weight_decay:
+    value: 0.01
+  unlearn_epochs:
+    value: 8
+  early_stop_patience:
+    value: 4
+  early_stop_metric:
+    value: "val"
+  grad_clip:
+    value: 1.0
+  warmup_proportion:
+    value: 0.1
+  scheduler:
+    value: "ReduceLROnPlateau"
+  unlearn_batch_size:
+    value: 16
+  eval_batch_size:
+    value: 16
+  eval_max_retain:
+    value: 512
+  mia_paper_batch_size:
+    value: 32
+  num_cpu_workers:
+    value: 2
+
+  # ===== Noise (only if use_noise=true) =====
+  noise_mean:
+    value: 0
+  noise_std:
+    value: 0.1
+
+  # ===== Loss weights (UR=alpha, UU=beta, MD=theta, MR=gamma, RE-anchor=eta) =====
+  alpha:
+    value: 1.0
+  beta:
+    value: 0.0
+  theta:
+    value: 0.0
+  gamma:
+    value: 1.0
+  eta_re_anchor:
+    value: 0.0
+
+  # ===== Classification losses (retain only) =====
+  kappa_cls_retain:
+    value: 2.0
+  kappa_cls_forget:
+    value: 0.0
+  cls_forget_clamp:
+    value: 4.0
+  uniform_prior_weight:
+    value: 0.0
+  unfreeze_classifier_heads:
+    value: true
+
+  # ===== Distillation (teacher=og, honest) =====
+  distill_teacher:
+    value: "og"
+  distill_retain_weight:
+    value: 1.5
+  distill_forget_weight:
+    value: 0.0
+  distill_temperature:
+    value: 2.0
+
+  # ===== Inverted Hinge Loss (IHL) =====
+  ihl_forget_weight:
+    value: 0.75
+
+  # ===== Forget-margin (bounded loss) =====
+  forget_margin:
+    value: 20.0
+
+  # ===== LoRA =====
+  lora_r:
+    value: 8
+  lora_alpha:
+    value: 16
+  lora_dropout:
+    value: 0.05
+  lora_target_modules:
+    value: ["query", "key", "value"]
+
+  # ===== Image PEFT =====
+  lora_image_last_k_blocks:
+    value: 1
+  lora_image_include_fc1:
+    value: false
+  loku_image_subtract_scale:
+    value: 0.3
+
+  # ===== Fisher Information =====
+  fisher_max_samples:
+    value: 256
+  fisher_batch_size:
+    value: 16
+  loku_init_scale:
+    value: 0.05
+  loku_subtract_scale:
+    value: 1.0
+
+  # ===== Model architecture flags =====
+  bert_pool_last_hidden:
+    value: false
+  bert_pool_use_img:
+    value: false
+  bert_pool_img_lowerlevel:
+    value: false
+
+  # ===== Misc =====
+  use_text_data_dir:
+    value: false
+  use_data_split_path:
+    value: false
+  training_mode:
+    value: "supervised"
+  semisupervised_training_data:
+    value: "allCXR"
+  use_masked_txt:
+    value: false
+  use_all_data:
+    value: false
+  use_pretrained_checkpoint:
+    value: false
+  print_predictions:
+    value: false
+  print_embeddings:
+    value: false
+  logging_steps:
+    value: 50
+  save_epochs:
+    value: 1
+  ihl_margin:
+    value: 0.5
+
+command:
+  - ${env:PYTHON}
+  - training/forgetmi_loku.py
+  - --config=config_loku_kaggle.yaml
