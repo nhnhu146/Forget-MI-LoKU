@@ -911,16 +911,28 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
 # ============================================================================
 
 def ensure_model_path(path, desc="model"):
-    if os.path.exists(os.path.join(path, "pytorch_model.bin")):
-        return path
+    # Accept either pytorch_model.bin OR model.safetensors (HF default since 2024).
+    # Also accept dir with just config.json — HF will then find weights itself.
     import glob
-    nested = glob.glob(os.path.join(path, "**", "pytorch_model.bin"), recursive=True)
-    if nested:
-        return os.path.dirname(nested[0])
+    WEIGHT_FILES = ("pytorch_model.bin", "model.safetensors")
+    for fname in WEIGHT_FILES:
+        if os.path.exists(os.path.join(path, fname)):
+            return path
+    # Sometimes path already valid as HF dir (has config.json) — let HF resolve
+    if os.path.exists(os.path.join(path, "config.json")):
+        return path
+    # Nested search inside path
+    for fname in WEIGHT_FILES:
+        nested = glob.glob(os.path.join(path, "**", fname), recursive=True)
+        if nested:
+            return os.path.dirname(nested[0])
+    # Last-resort: search common mount roots (Colab + Kaggle)
     base = os.path.basename(path.rstrip('/'))
-    for m in glob.glob("/content/**/pytorch_model.bin", recursive=True):
-        if base in m and "checkpoint" not in m:
-            return os.path.dirname(m)
+    for root in ("/content", "/kaggle/input", "/kaggle/working"):
+        for fname in WEIGHT_FILES:
+            for m in glob.glob(f"{root}/**/{fname}", recursive=True):
+                if base in m and "checkpoint" not in m:
+                    return os.path.dirname(m)
     print(f"❌ Cannot locate {desc} at {path}")
     return path
 
