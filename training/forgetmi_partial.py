@@ -930,9 +930,16 @@ def main():
     print(f"📦 Loading models...")
     model_og = ImageTextModel.from_pretrained(config.base_model_path).to(device)
     model_unlearn = copy.deepcopy(model_og)
-    # Keep model_retrained on GPU as in original paper code — per-epoch CosSim eval
-    # depends on it residing on the same device as model_ul.
-    model_retrained = ImageTextModel.from_pretrained(config.retrained_model_path).to(device)
+    # Try to load retrained; on failure fallback to model_og as dummy so the script
+    # can still run (per-epoch CosSim eval will be vs model_og — meaningless but doesn't
+    # crash). Happens when forget% has no gold retrained model on disk (e.g., 6%/10%).
+    try:
+        model_retrained = ImageTextModel.from_pretrained(config.retrained_model_path).to(device)
+    except Exception as e:
+        print(f"⚠️  Cannot load retrained from {config.retrained_model_path}")
+        print(f"   Reason: {type(e).__name__}: {str(e)[:200]}")
+        print(f"   → Using model_og as DUMMY retrained — CosSim metrics will be INVALID (dist_vs_re ≈ 0)")
+        model_retrained = copy.deepcopy(model_og).to(device)
 
     tokenizer = BertTokenizer.from_pretrained(config.bert_pretrained_dir)
 
