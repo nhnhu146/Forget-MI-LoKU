@@ -189,18 +189,32 @@ def build_dataset(args, tokenizer):
                     if args.output_channel_encoding == 'multilabel'
                     else convert_examples_to_features)
 
-    cached = os.path.join(args.text_data_dir,
-                          f"cachedfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}")
-    cached_noisy = os.path.join(args.text_data_dir,
-                                f"cachednoisyfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}")
+    cache_fname = f"cachedfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}"
+    cache_noisy_fname = f"cachednoisyfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}"
+    cached = os.path.join(args.text_data_dir, cache_fname)
+    cached_noisy = os.path.join(args.text_data_dir, cache_noisy_fname)
 
-    def _regenerate():
+    def _writable_cache_dir():
+        # Kaggle input mounts là read-only → regenerate cache vào nơi ghi được.
+        return ('/kaggle/working/text_cache_regen' if os.path.isdir('/kaggle/working')
+                else os.path.join(os.getcwd(), 'text_cache_regen'))
+
+    def _regen_to(dst_dir):
+        """Build features fresh từ all_data.tsv và ghi vào dst_dir (phải writable)."""
+        src_tsv = os.path.join(args.text_data_dir, 'all_data.tsv')
+        if not os.path.exists(src_tsv):
+            raise FileNotFoundError(
+                f"Không thể regenerate cache: thiếu {src_tsv}. Upload all_data.tsv vào "
+                f"folder 'metadata/' của Kaggle dataset."
+            )
+        os.makedirs(dst_dir, exist_ok=True)
         synonyms = pd.read_csv(args.synonyms_dir)
         examples = processor.get_all_examples(args.text_data_dir)
         noisy_examples = processor.get_noisy_examples(args.text_data_dir, synonyms, args.text_noise_level)
         feats = get_features(examples, processor.get_labels(), args.max_seq_length, tokenizer)
         noisy_feats = get_features(noisy_examples, processor.get_labels(), args.max_seq_length, tokenizer)
-        torch.save(feats, cached); torch.save(noisy_feats, cached_noisy)
+        torch.save(feats, os.path.join(dst_dir, cache_fname))
+        torch.save(noisy_feats, os.path.join(dst_dir, cache_noisy_fname))
         return feats, noisy_feats
 
     if os.path.exists(cached) and os.path.exists(cached_noisy) and not args.reprocess_input_data:
@@ -209,7 +223,13 @@ def build_dataset(args, tokenizer):
         noisy_features = torch.load(cached_noisy, weights_only=False)
     else:
         print("🔨 Generating features (lần đầu, ~5 phút)...")
-        features, noisy_features = _regenerate()
+        # Thử ghi vào text_data_dir; nếu read-only (Kaggle input) → fallback writable dir.
+        try:
+            features, noisy_features = _regen_to(args.text_data_dir)
+        except (PermissionError, OSError):
+            wd = _writable_cache_dir()
+            print(f"⚠️  text_data_dir read-only → regenerating to {wd}")
+            features, noisy_features = _regen_to(wd)
 
     all_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in features}
     noisy_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in noisy_features}
@@ -218,19 +238,24 @@ def build_dataset(args, tokenizer):
      test_l, test_ids, rand_l, rand_ids, forget_l, forget_ids) = \
         data_split(args.data_split_path, args.forget_set_path, args.validation_ratio)
 
-    # CACHE INTEGRITY CHECK: if cache report_ids không khớp với split → cache stale, regenerate
+    # CACHE INTEGRITY CHECK: nếu cache report_ids không khớp với split → cache stale.
+    # KHÔNG os.remove() cache gốc (Kaggle input read-only) → regenerate sang writable dir.
     sample_ids = list(retain_ids.values())[:50]
     matches = sum(1 for rid in sample_ids if rid in all_txt)
     if sample_ids and matches == 0:
         print(f"⚠️  Cache mismatch! 0/{len(sample_ids)} sample retain IDs khớp với cache.")
-        print(f"   → Đang xóa cache stale và regenerate (1 lần, ~5 phút)...")
-        for p in (cached, cached_noisy):
-            if os.path.exists(p):
-                os.remove(p)
-        features, noisy_features = _regenerate()
+        wd = _writable_cache_dir()
+        re_cached = os.path.join(wd, cache_fname)
+        re_cached_noisy = os.path.join(wd, cache_noisy_fname)
+        if os.path.exists(re_cached) and os.path.exists(re_cached_noisy):
+            print(f"   ↳ dùng lại regen cache đã có → {wd}")
+            features = torch.load(re_cached, weights_only=False)
+            noisy_features = torch.load(re_cached_noisy, weights_only=False)
+        else:
+            print(f"   ↳ regenerate sang {wd} (1 lần, ~5 phút)...")
+            features, noisy_features = _regen_to(wd)
         all_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in features}
         noisy_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in noisy_features}
-        # Recheck
         matches = sum(1 for rid in sample_ids if rid in all_txt)
         if matches == 0:
             raise RuntimeError(

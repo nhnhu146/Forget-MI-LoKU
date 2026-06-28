@@ -49,11 +49,14 @@ parameters:
 
   # ===== Dataset prep =====
   max_seq_length:
-    value: 256                                               # IU reports ngắn hơn MIMIC (320)
+    value: 320                                               # PHẢI khớp giữa train/baseline/loku
+                                                             # (cache features = ..._seqlen-320_...)
   text_noise_level:
     value: 0.5
   output_channel_encoding:
-    value: "binary"                                          # KEY: IU là binary task
+    value: "multiclass"                                      # IU binary 0/1 đi qua head 4-class
+                                                             # (convert_to_onehot). 'binary' KHÔNG
+                                                             # được data loader hỗ trợ → sẽ crash.
   reprocess_input_data:
     value: false
   validation_ratio:

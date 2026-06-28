@@ -38,7 +38,8 @@ parameters:
   text_noise_level:
     value: 0.5
   output_channel_encoding:
-    value: "binary"                                          # KEY: IU = binary normal/abnormal
+    value: "multiclass"                                      # IU binary 0/1 qua head 4-class
+                                                             # ('binary' không được loader hỗ trợ)
   reprocess_input_data:
     value: false
   validation_ratio:

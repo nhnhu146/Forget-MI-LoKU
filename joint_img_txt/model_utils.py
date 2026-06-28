@@ -7,6 +7,7 @@ from __future__ import absolute_import, division, print_function
 
 import csv
 import os
+import re
 import sys
 import logging
 from scipy.stats import logistic
@@ -577,6 +578,14 @@ class CXRImageTextDataset(Dataset):
 
         # img_path = os.path.join(self.img_dir, "p" + subject_id[:2], "p"+subject_id,  "s" +study_id, img_id+self.img_format)
         img_path = os.path.join(self.img_dir, img_id+self.img_format)
+        # MIMIC images are .jpg (self.img_format); IU images are .png. Fall back to other
+        # extensions so the same Dataset class works for both without per-dataset config.
+        if not os.path.exists(img_path):
+            for _ext in ('.png', '.jpg', '.jpeg', '.npy', '.dcm'):
+                _alt = os.path.join(self.img_dir, img_id + _ext)
+                if os.path.exists(_alt):
+                    img_path = _alt
+                    break
         image = load_image(img_path, perturb_img=self.perturb_img, noise_params=self.noise_params)
             
         if self.transform:
@@ -601,11 +610,17 @@ class CXRImageTextDataset(Dataset):
         
         if self.output_channel_encoding == 'multilabel':
             txt_label = torch.tensor(self.all_txt_labels[txt_key], dtype=torch.long)
-        elif self.output_channel_encoding == 'multiclass':
+        else:
+            # 'multiclass' AND 'binary' both map the integer severity to a 4-way one-hot.
+            # IU is a binary normal/abnormal task (labels 0/1), which is a strict subset of
+            # the 4-class head → classes 2,3 simply never appear. Using one branch here also
+            # removes a latent bug where 'binary' previously left txt_label undefined.
             txt_label = torch.tensor(convert_to_onehot(self.all_txt_labels[txt_key]), dtype=torch.long)
 
-        safe_report_id = str(txt_id).replace('s', '')
-        report_id = int(safe_report_id)
+        # report_id is collated into an int tensor downstream. MIMIC ids are numeric strings;
+        # IU ids look like "CXR349" → strip non-digits so int() doesn't crash on the prefix.
+        safe_report_id = re.sub(r'\D', '', str(txt_id))
+        report_id = int(safe_report_id) if safe_report_id else 0
 
         sample = [image, img_label, txt_tokens, txt_mask, txt_segments, txt_label, report_id]
 
