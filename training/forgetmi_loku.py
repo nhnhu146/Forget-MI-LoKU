@@ -234,6 +234,14 @@ def build_dataset(args, tokenizer):
     all_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in features}
     noisy_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in noisy_features}
 
+    def _resolve(r, txt_map):
+        """Khớp id từ split với key cache, dung sai prefix 's' của study_id và
+        int/str (cùng logic forgetmi_partial). Trả về key thực hoặc None."""
+        for cand in (r, f"s{r}", str(r).replace('s', '')):
+            if cand in txt_map:
+                return cand
+        return None
+
     (retain_l, retain_ids, val_l, val_ids,
      test_l, test_ids, rand_l, rand_ids, forget_l, forget_ids) = \
         data_split(args.data_split_path, args.forget_set_path, args.validation_ratio)
@@ -241,7 +249,7 @@ def build_dataset(args, tokenizer):
     # CACHE INTEGRITY CHECK: nếu cache report_ids không khớp với split → cache stale.
     # KHÔNG os.remove() cache gốc (Kaggle input read-only) → regenerate sang writable dir.
     sample_ids = list(retain_ids.values())[:50]
-    matches = sum(1 for rid in sample_ids if rid in all_txt)
+    matches = sum(1 for rid in sample_ids if _resolve(rid, all_txt))
     if sample_ids and matches == 0:
         print(f"⚠️  Cache mismatch! 0/{len(sample_ids)} sample retain IDs khớp với cache.")
         wd = _writable_cache_dir()
@@ -256,7 +264,7 @@ def build_dataset(args, tokenizer):
             features, noisy_features = _regen_to(wd)
         all_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in features}
         noisy_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in noisy_features}
-        matches = sum(1 for rid in sample_ids if rid in all_txt)
+        matches = sum(1 for rid in sample_ids if _resolve(rid, all_txt))
         if matches == 0:
             raise RuntimeError(
                 f"Sau khi regenerate cache vẫn 0/{len(sample_ids)} match. "
@@ -268,7 +276,7 @@ def build_dataset(args, tokenizer):
     def extract(mapping, ids):
         t, m, s, l = {}, {}, {}, {}
         for rid in ids:
-            t[rid], m[rid], s[rid], l[rid] = mapping[rid]
+            t[rid], m[rid], s[rid], l[rid] = mapping[_resolve(rid, mapping)]
         return t, m, s, l
 
     train_trans = RandomTranslateCrop(2048)
@@ -282,7 +290,7 @@ def build_dataset(args, tokenizer):
         ('forget', forget_ids, forget_l, train_trans, all_txt),
         ('random', rand_ids, rand_l, train_trans, noisy_txt),
     ]:
-        valid = [d for d, r in ids.items() if r in txt_map]
+        valid = [d for d, r in ids.items() if _resolve(r, txt_map)]
         if len(valid) < len(ids):
             print(f"⚠️  {len(ids) - len(valid)} items in '{name}' set skipped (text not found)")
         f_ids = {d: ids[d] for d in valid}
