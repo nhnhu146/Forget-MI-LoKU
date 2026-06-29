@@ -9,3 +9,9 @@ __pycache__/
 *.pyc
 .DS_Store
 .ipynb_checkpoints/
+
+# Raw datasets / leftover local downloads — dùng Kaggle datasets thay thế
+*.tgz
+*.tgz.part
+/data_iu/
+/iu_download_v2/
