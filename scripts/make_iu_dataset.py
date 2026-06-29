@@ -166,6 +166,10 @@ def main():
         tsv_rows.append((str(len(tsv_rows)), str(r["label"]), rid, r["text"]))
     with open(tsv_path, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
+        # Header row: processor (_create_examples / _create_noisy_examples) skips line[0]
+        # as header — matches MIMIC's all_data.tsv. Without it the FIRST real report would
+        # be silently dropped (and its images filtered out at build_dataset).
+        w.writerow(["idx", "label", "report_id", "text"])
         for row in tsv_rows:
             w.writerow(row)
     print(f"💾 all_data.tsv: {len(tsv_rows)} reports → {tsv_path}")
