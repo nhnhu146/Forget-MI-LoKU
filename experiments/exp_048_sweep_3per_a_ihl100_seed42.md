@@ -5,8 +5,10 @@
 | **Date** | 2026-06-26 |
 | **Git commit** | `2a522f6` |
 | **Branch** | `master` |
-| **Status** | 🔄 Running |
-| **Duration** | <!-- AUTO:duration -->(auto)<!-- /AUTO --> |
+| **Status** | ✅ Auto-tracked (cần điền Observations + Conclusion) |
+| **Duration** | <!-- AUTO:duration -->
+0.119h
+<!-- /AUTO --> |
 
 ---
 
@@ -272,12 +274,31 @@ python training/forgetmi_loku.py --config config.yaml --fresh --exp sweep_3per_a
 
 ### 5.1 Training curves
 <!-- AUTO:training_curves -->
-_(auto)_
+```
+[E00] loss=+7.704  UKR=+0.932  MKR=+2.159  CLS_ret=+1.380  DSL_ret=+0.5433  DSL_frg=+0.0000  IHL_frg=+1.0372  | val_CE=1.5011
+[E01] loss=+6.777  UKR=+0.389  MKR=+2.013  CLS_ret=+1.286  DSL_ret=+0.5236  DSL_frg=+0.0000  IHL_frg=+1.0176  | val_CE=0.9063
+[E02] loss=+6.089  UKR=+0.365  MKR=+1.919  CLS_ret=+1.105  DSL_ret=+0.3820  DSL_frg=+0.0000  IHL_frg=+1.0213  | val_CE=0.9956
+[E03] loss=+5.679  UKR=+0.402  MKR=+1.813  CLS_ret=+1.022  DSL_ret=+0.2867  DSL_frg=+0.0000  IHL_frg=+0.9905  | val_CE=0.9573
+[E04] loss=+5.246  UKR=+0.318  MKR=+1.739  CLS_ret=+0.942  DSL_ret=+0.2341  DSL_frg=+0.0000  IHL_frg=+0.9538  | val_CE=1.0121
+[E05] loss=+4.967  UKR=+0.292  MKR=+1.681  CLS_ret=+0.861  DSL_ret=+0.2384  DSL_frg=+0.0000  IHL_frg=+0.9158  | val_CE=1.1724
+```
 <!-- /AUTO -->
 
 ### 5.2 Final metrics
 <!-- AUTO:metrics -->
-_(auto)_
+| Metric | Value | Δ vs Paper (3%) |
+|---|---|---|
+| MIA_persample ↓ | **0.488** | (LoKU per-sample SVM) |
+| MIA_paper ↓ | **0.571** | +0.000 ❌ |
+| Forget AUC ↓ | **0.741** | +0.006 ❌ |
+| Forget F1 ↓ | **0.369** | -0.024 ✅ |
+| Test AUC ↑ | **0.674** | +0.049 ✅ |
+| Test F1 ↑ | **0.330** | +0.080 ✅ |
+| 1−CosSim ↓ | **0.328** | -0.122 ✅ |
+| Time (h) | **0.119** | -4.881 ✅ |
+| GPU peak (GB) | **11.78** | — |
+| Trainable params | **0.451%** | (vs 100% paper) |
+
 <!-- /AUTO -->
 
 ---
