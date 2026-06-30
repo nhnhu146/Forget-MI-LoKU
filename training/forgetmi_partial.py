@@ -394,6 +394,88 @@ def get_model_inputs(args, dataset, device):
             } 
     return inputs, label_raw, report_id
 
+def _write_perepoch_row(csv_path, epoch, args, m):
+    """Append 1 dòng metrics/epoch vào CSV (header tự tạo lần đầu)."""
+    import csv as _csv
+    cols = ['id', 'seed', 'epoch', 'Df_AUC', 'Df_F1', 'Dt_AUC', 'Dt_F1',
+            'MIA', 'MIA_paper', 'forget_ce', 'test_ce', 'dist_vs_re']
+    row = {'id': getattr(args, 'id', ''), 'seed': getattr(args, 'random_seed', ''), 'epoch': epoch}
+    for k in ['Df_AUC', 'Df_F1', 'Dt_AUC', 'Dt_F1', 'MIA', 'MIA_paper', 'forget_ce', 'test_ce', 'dist_vs_re']:
+        row[k] = m.get(k, '')
+    new = not os.path.exists(csv_path)
+    d = os.path.dirname(csv_path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(csv_path, 'a', newline='') as f:
+        w = _csv.DictWriter(f, fieldnames=cols)
+        if new:
+            w.writeheader()
+        w.writerow(row)
+
+
+def _eval_epoch_metrics(args, device, model_ul, model_re, dataset):
+    """Eval READ-ONLY tại epoch hiện tại → trả dict metrics (giống final, bỏ phần in).
+
+    KHÔNG được làm lệch training: lưu & phục hồi train-mode, requires_grad, và TOÀN BỘ
+    RNG state (torch/cuda/python/numpy) — nhờ vậy kết quả E29 y hệt bản chạy trung thực.
+    """
+    import random as _random
+    import numpy as _np
+    from training.forgetmi_loku import (
+        run_mia, cosine_sim_models, perf_metrics, _subsample_dataset
+    )
+    was_training = model_ul.training
+    grad_states = [p.requires_grad for p in model_ul.parameters()]
+    cpu_rng = torch.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    py_rng = _random.getstate()
+    np_rng = _np.random.get_state()
+
+    bs = int(getattr(args, 'eval_batch_size', 16))
+    eval_max_retain = int(getattr(args, 'eval_max_retain', 512))
+    paper_bs = int(getattr(args, 'mia_paper_batch_size', 32))
+    out = {}
+    try:
+        model_ul.eval()
+        with torch.no_grad():
+            try:
+                mia_res = run_mia(model_ul, dataset['retain'], dataset['test'], dataset['forget'],
+                                  device, args, batch_size=bs,
+                                  seed=int(args.random_seed), paper_batch_size=paper_bs)
+                out['MIA'] = round(mia_res['persample'], 3)
+                out['MIA_paper'] = round(mia_res['paper'], 3)
+                out['forget_ce'] = round(mia_res.get('forget_ce', float('nan')), 3)
+                out['test_ce'] = round(mia_res.get('test_ce', float('nan')), 3)
+            except Exception as e:
+                print(f"   ⚠️  per-epoch MIA failed: {e}")
+            try:
+                fm = perf_metrics(model_ul, dataset['forget'], device, args, batch_size=bs)
+                tm = perf_metrics(model_ul, dataset['test'], device, args, batch_size=bs)
+                out['Df_AUC'] = round(fm['AUC'], 3); out['Df_F1'] = round(fm['Macro_F1'], 3)
+                out['Dt_AUC'] = round(tm['AUC'], 3); out['Dt_F1'] = round(tm['Macro_F1'], 3)
+            except Exception as e:
+                print(f"   ⚠️  per-epoch perf failed: {e}")
+            try:
+                if model_re is not None:
+                    cds = _subsample_dataset(dataset['retain'], eval_max_retain, int(args.random_seed))
+                    cs = cosine_sim_models(model_ul, model_re, cds, device, args, batch_size=bs)
+                    out['dist_vs_re'] = round(1 - cs, 3)
+            except Exception as e:
+                print(f"   ⚠️  per-epoch cossim failed: {e}")
+    finally:
+        if was_training:
+            model_ul.train()
+        for p, g in zip(model_ul.parameters(), grad_states):
+            p.requires_grad = g
+        torch.set_rng_state(cpu_rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state_all(cuda_rng)
+        _random.setstate(py_rng)
+        _np.random.set_state(np_rng)
+        torch.cuda.empty_cache()
+    return out
+
+
 def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, optimizer_grouped_parameters, scheduler, tokenizer, dataset, num_labels, alpha, beta, theta, gamma):
     retain_set, val_set, rand_set, forget_set, test_set = (
         dataset['retain'], dataset['validation'], dataset['random'], dataset['forget'], dataset['test']
@@ -601,6 +683,18 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
         os.makedirs(epoch_output_dir, exist_ok=True)
         model_to_save = model_ul.module if hasattr(model_ul, 'module') else model_ul
         torch.save(model_to_save.state_dict(), os.path.join(epoch_output_dir, "model_state_dict.pth"))
+
+        # ----- Per-epoch eval (READ-ONLY, bật bằng --override eval_every_epoch=1) -----
+        # Vẽ quỹ đạo Df_AUC/MIA... theo epoch để dò điểm khớp paper. KHÔNG đụng training:
+        # _eval_epoch_metrics khôi phục train-mode/grad/RNG nên E29 vẫn y hệt bản trung thực.
+        if getattr(args, 'eval_every_epoch', False):
+            _pe = _eval_epoch_metrics(args, device, model_ul, model_re, dataset)
+            _pe_csv = os.path.join(os.path.dirname(os.path.dirname(output_dir)),
+                                   f"perepoch_{getattr(args, 'id', 'run')}.csv")
+            _write_perepoch_row(_pe_csv, epoch, args, _pe)
+            print(f"   📈 [eval E{epoch:02d}] Df_AUC={_pe.get('Df_AUC')} Dt_AUC={_pe.get('Dt_AUC')} "
+                  f"MIA={_pe.get('MIA')} MIA_paper={_pe.get('MIA_paper')} "
+                  f"fce={_pe.get('forget_ce')} tce={_pe.get('test_ce')}")
 
 
     # ------------------------------------------- Log Unlearning Time Taken -------------------------------------------    
