@@ -20,7 +20,11 @@ metadata:
 - Baseline tái lập (`training/forgetmi_partial.py`) là **THƯỚC ĐO** để chấm LoKU — **KHÔNG** dùng số paper công bố (so với paper bị lệch pipeline/confounded). Cả LoKU và baseline phải chạy **cùng pipeline/máy/eval/seed** → đối chứng có kiểm soát.
 - NHƯNG baseline phải **tái lập ĐÚNG số paper** (Df_AUC~0.735, MIA~0.571 ở 3%) để đáng tin — **bằng paper, không hơn không kém**.
 - **Dùng NGUYÊN code + config gốc**, KHÔNG sửa logic, KHÔNG "cải tiến", KHÔNG tự chế chọn-epoch. Code gốc ở `C:\Users\admin\Downloads\Forget-MI-main\Forget-MI-main`. Logic train trong repo đã giống hệt gốc (data_split, vòng unlearn, loss, hinge, `optimizer.step()` 1 lần/epoch).
-- **Bug đã sửa**: weights bị đổi sang `4/4/1/1` (Unimodal) → over-forget (Df_AUC 0.571). Paper `config.yaml` dùng `alpha=1,beta=1,theta=2,gamma=2` (0.17/0.17/0.33/0.33). Đã sửa trong `config_baseline_kaggle.yaml`. lr: paper sweep [1e-4,1e-5], đang để 1e-5; thử 1e-4 nếu Df_AUC còn thấp.
+- **Bug đã sửa**: weights bị đổi sang `4/4/1/1` (Unimodal) → over-forget. Paper `config.yaml` dùng `alpha=1,beta=1,theta=2,gamma=2`. Đã sửa.
+- **LỜI THẦY (kim chỉ nam)**: "chạy code gốc mà số ra kì thì cứ kệ nó" → **KHÔNG đẽo gọt để ra số paper** (loại phương án curve-fit về 0.735).
+- **KẾT QUẢ baseline 3% MIMIC (seed 42, 30 epoch, config đúng)**: Df_AUC=**0.561**, Df_F1=0.156, Dt_AUC=0.632, MIA_persample=0.493, MIA_paper=1.000 (per-batch nhiễu), forget_ce=4.807 ≫ test_ce=3.446 → **OVER-FORGET**. Weights đã đúng mà vẫn over-forget → **nguyên nhân KHÔNG phải weights** mà là **eval ở epoch CUỐI (E29)**: code gốc lưu MỌI epoch + `eval_unlearning.py` chọn 1 checkpoint; pipeline mình xóa hết chỉ eval E29 (chỗ over-forget nhất).
+- **DIỄN GIẢI ĐÚNG (quan trọng)**: thước đo thật = **model gold retrained**, KHÔNG phải "Df_AUC thấp nhất". Df_AUC 0.561 = quên QUÁ ĐÀ (vượt gold) + phá model (CosSim 0.66→0.565). Over-forget là **ĐIỂM YẾU của Forget-MI**, không phải mạnh. LoKU thắng bằng **quên lành mạnh + giữ retain/MIA + hiệu quả**, KHÔNG phải "quên mạnh hơn".
+- **GIẢI PHÁP đã code (commit 186b87f)**: thêm eval per-epoch READ-ONLY (`--override eval_every_epoch=1`, toggle `EVAL_EVERY_EPOCH` notebook baseline, mặc định bật). Mỗi epoch ghi `/kaggle/working/perepoch_<id>.csv` (Df_AUC/Dt_AUC/MIA/forget_ce/test_ce...). **1 run ra CẢ HAI**: E29 trung thực (RNG được khôi phục → y hệt bản gốc) + quỹ đạo để dò epoch khớp paper. Re-run baseline 3% để lấy quỹ đạo.
 
 ## 2. TRẠNG THÁI HIỆN TẠI + ĐANG CHỜ
 - **Deadline ~1 tuần (từ 2026-06-30)**. Bắt buộc có **IU-CXR 3% rút gọn** (1–2 seed); IU đầy đủ đã cắt.
