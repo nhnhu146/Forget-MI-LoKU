@@ -28,10 +28,20 @@ metadata:
 
 ## 2. TRẠNG THÁI HIỆN TẠI + ĐANG CHỜ
 - **Deadline ~1 tuần (từ 2026-06-30)**. Bắt buộc có **IU-CXR 3% rút gọn** (1–2 seed); IU đầy đủ đã cắt.
-- **⏳ ĐANG CHỜ (quan trọng)**: kết quả **baseline 3% MIMIC (1 seed)** chạy lại với config đúng paper (weights 1/1/2/2). Repo CSV `results_summary_kaggle.csv` đã reset header-only + xóa summary cũ → user phải chạy trong **session Kaggle MỚI** để Cell 1 khôi phục CSV sạch. Kiểm tra **Df_AUC≈0.735, MIA≈0.571**; chưa khớp → đổi lr 1e-5→1e-4. Cả `config_baseline_kaggle.yaml` và `config_baseline_iu_kaggle.yaml` đều đã sửa weights về 1/1/2/2.
-- **⏳ ĐANG CHỜ (IU)**: user tạo dataset **`forget-mi-data-iu`** từ preprocess. Preprocess OK (3826 report, 7426 ảnh) + fix: header all_data.tsv, dò ảnh đệ quy. **QUYẾT ĐỊNH ẢNH: `--link_mode skip`** (KHÔNG đóng gói ảnh) — vì copy 7426 file ~2GB làm Kaggle treo lúc lưu output. → `forget-mi-data-iu` chỉ chứa metadata (~3MB). Lúc train/baseline/loku IU phải **attach kèm dataset raddar** và trỏ `img_data_dir` sang `images/images_normalized` của raddar (tên file khớp `<dicom_id>.png`). Đã sửa **cả 4**: `preprocess` (skip), `run_kaggle_train_iu`, baseline IU (Cell 3, thêm `img_dir`), loku IU (Cell 9) — tất cả fallback sang raddar `images_normalized`. Mỗi lần chạy IU phải **Add data: forget-mi-data-iu + raddar/chest-xrays-indiana-university** (+ forget-mi-models-iu cho baseline/loku). Sau đó mới train og+re → baseline IU → LoKU IU. Xem `HUONG_DAN_IU.md`.
-- **Config LoKU đã chốt**: `D_combo_aggressive` (IHL=1.25, img=0.5, 8ep, kappa=2.0) — quên lành mạnh (forget_ce≈test_ce), thắng số paper. Mới seed 42, cần multi-seed (123, 7). Sweep: `run_kaggle_loku_sweep.ipynb` chưa có push-mỗi-config (timeout mất việc); 10% mới A–G (thiếu H/I/J).
-- **Đã xong & trên GitHub**: code LoKU chạy được Kaggle; sweep 27 config (seed 42). **Chưa**: baseline đúng-paper (đang chạy lại), LoKU-D multi-seed, toàn bộ IU 3%.
+### ⏳ ĐANG CHỜ (cập nhật khi xong thì XÓA dòng đó)
+1. **baseline 3% MIMIC re-run có per-epoch eval** (account hoangnhu2) → lấy `perepoch_*.csv` (quỹ đạo Df_AUC/MIA theo epoch). E29 đã có (0.561); re-run để có TRAJECTORY dò epoch khớp paper. RNG được khôi phục nên E29 không đổi.
+2. **baseline 6% + 10% MIMIC** — chạy SONG SONG account khác, **mỗi account 1 %** (per-epoch eval làm mỗi run ~4.5h → cả 3 không vừa 12h). Cờ: account B `RUN_6PER=True` (tắt 3/10), account C `RUN_10PER=True` (tắt 3/6). Paper ref Df_AUC 0.654(6%)/0.656(10%). Để ý log gold `model_retrained_6per/10per` (nếu fallback→3per thì dist_vs_re vô nghĩa).
+3. **IU `re` model** (`model_retrained_iu_3per`) — train trên train−forget3%, RUN_OG=False/RUN_RE=True, **Quick Save** (KHÔNG Run All kẻo mất og). Rồi tạo dataset. og và re có thể ở **2 dataset riêng** (`forget-mi-models-iu` + `forget-mi-models-iu-re`) — baseline/loku dò bằng glob nên attach cả 2 là được.
+4. **IU baseline 3% + LoKU IU 3%** (sau khi có og+re). Attach: forget-mi-data-iu + raddar + 2 dataset model IU.
+5. **LoKU-D multi-seed** (123, 7) @ 3/6/10% — HOÃN (chưa gấp).
+
+### ✅ ĐÃ XONG (khỏi chờ)
+- **baseline 3% MIMIC** seed42 first result: Df_AUC 0.561 (over-forget E29) — xem mục 1.
+- **IU preprocess** → `forget-mi-data-iu` (metadata, `--link_mode skip`, ~3MB). Ảnh dùng raddar trực tiếp.
+- **IU og model** (`model_og_IU`): 15 epoch, 110min, loss 1.49→0.67, val_acc~1.0, đã lưu (453MB). 15 epoch là ĐỦ (hội tụ ~E11) — re cũng để 15 cho khớp.
+- code LoKU chạy Kaggle + sweep 27 config (seed 42), config D chốt: `D_combo_aggressive` (IHL=1.25, img=0.5, 8ep, kappa=2.0), quên lành mạnh.
+
+### Workflow IU (tham chiếu): preprocess(skip) → train og+re (warm-start MIMIC, attach raddar) → tạo 2 dataset model → baseline IU + LoKU IU. Mỗi run IU attach: **forget-mi-data-iu + raddar/chest-xrays-indiana-university** (+ model IU). Xem `HUONG_DAN_IU.md`.
 
 ## 3. CÁCH TÍNH MIA
 - Đặc trưng = cross-entropy **nhánh ảnh (img_logits)** thôi. `SVC(C=3,rbf)` tách retain(member=1)/test(non-member=0) → **MIA = tỉ lệ forget bị đoán "member"** ∈ [0,1].
