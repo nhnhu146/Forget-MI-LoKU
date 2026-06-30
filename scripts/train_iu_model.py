@@ -45,6 +45,7 @@ Usage (Kaggle):
 """
 import argparse
 import csv
+import json
 import os
 import random
 import shutil
@@ -215,6 +216,8 @@ def main():
     ap.add_argument("--bert_pretrained_dir", default=None,
                     help="BERT checkpoint for cold start AND tokenizer source")
     ap.add_argument("--output_dir", required=True)
+    ap.add_argument("--resume_from", default="",
+                    help="Dir chứa _train_state.json + model từ run trước (resume khi Kaggle timeout 12h)")
     # data path overrides (else taken from --config)
     ap.add_argument("--text_data_dir", default=None)
     ap.add_argument("--img_data_dir", default=None)
@@ -244,6 +247,20 @@ def main():
     cfg = _load_config(cli.config)
     args = _build_args(cfg, cli)
 
+    # ---- Resume (Kaggle 12h timeout): nạp model train dở + train tiếp ----
+    start_epoch, best_val = 1, float("inf")
+    _resume_dir = None
+    for _cand in ((cli.resume_from or ""), cli.output_dir):
+        if _cand and os.path.exists(os.path.join(_cand, "_train_state.json")):
+            _resume_dir = _cand
+            break
+    if _resume_dir:
+        _st = json.load(open(os.path.join(_resume_dir, "_train_state.json")))
+        start_epoch = int(_st.get("epoch", 0)) + 1
+        best_val = float(_st.get("best_val", float("inf")))
+        cli.init_from = _resume_dir   # nạp model đã train dở thay vì warm-start MIMIC
+        print(f"♻️  RESUME: {_resume_dir} (đã xong epoch {_st.get('epoch')}) → train tiếp từ epoch {start_epoch}")
+
     # Tokenizer source: init_from (warm) or bert_pretrained_dir (cold). Falls back to config.
     tok_src = cli.init_from or cli.bert_pretrained_dir or cfg.get("bert_pretrained_dir")
     print(f"🔤 Tokenizer from: {tok_src}")
@@ -271,11 +288,10 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=cli.lr, weight_decay=cli.weight_decay)
 
     os.makedirs(cli.output_dir, exist_ok=True)
-    best_val = float("inf")
     t0 = time.time()
     print(f"\n{'='*70}\n🚂 TRAIN {cli.mode.upper()} — epochs={cli.epochs} lr={cli.lr} bs={cli.batch_size}\n{'='*70}")
 
-    for epoch in range(1, cli.epochs + 1):
+    for epoch in range(start_epoch, cli.epochs + 1):
         model.train()
         run_loss, n_batch = 0.0, 0
         pbar = tqdm(train_loader, desc=f"E{epoch:02d}/{cli.epochs}")
@@ -299,13 +315,17 @@ def main():
               f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} | "
               f"elapsed={elapsed:.1f}m ETA={eta:.1f}m")
 
-        if cli.save_best and val_loss < best_val:
+        if val_loss < best_val:
             best_val = val_loss
-            _save(model, cli.output_dir, tok_src)
-            print(f"   💾 best so far (val_loss={val_loss:.4f}) → saved")
-
-    if not cli.save_best:
+        # Rolling checkpoint MỖI epoch → resume được khi Kaggle ngắt 12h.
         _save(model, cli.output_dir, tok_src)
+        with open(os.path.join(cli.output_dir, "_train_state.json"), "w") as _f:
+            json.dump({"epoch": epoch, "best_val": best_val}, _f)
+
+    # Final save (cũng cover case start_epoch>epochs → loop rỗng, model đã train đủ từ run trước).
+    _save(model, cli.output_dir, tok_src)
+    with open(os.path.join(cli.output_dir, "_train_state.json"), "w") as _f:
+        json.dump({"epoch": cli.epochs, "best_val": best_val}, _f)
 
     n_tok = _copy_tokenizer(tok_src, cli.output_dir)
     print(f"\n✅ DONE. Saved model + {n_tok} tokenizer files → {cli.output_dir}")
