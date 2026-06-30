@@ -108,17 +108,18 @@ parameters:
   noise_std:
     value: 0.1
 
-  # ===== Loss weights — "Unimodal" setting (best for 3% per paper Table 2) =====
-  # w_uu=0.4, w_ur=0.4, w_mu=0.1, w_mr=0.1 (sẽ normalize trong main())
-  # Code maps: alpha=UR, beta=UU, theta=MU, gamma=MR
+  # ===== Loss weights — ĐÚNG config.yaml GỐC của paper (alpha=1,beta=1,theta=2,gamma=2) =====
+  # Chuẩn hóa: 0.17/0.17/0.33/0.33 (Multimodal-leaning). KHÔNG dùng 4/4/1/1 ("Unimodal")
+  # vì beta(UU) cao + use_noise=false (L_uu = -dist, đẩy-ra-xa không chặn) → over-forget.
+  # Code maps: alpha=UKR(giữ uni), beta=UU(quên uni), theta=MD(quên multi), gamma=MKR(giữ multi)
   alpha:
-    value: 4                                                 # UR weight (raw, sẽ normalize)
+    value: 1                                                 # UKR weight (raw, sẽ normalize)
   beta:
-    value: 4                                                 # UU weight
+    value: 1                                                 # UU weight
   theta:
-    value: 1                                                 # MU weight
+    value: 2                                                 # MD weight
   gamma:
-    value: 1                                                 # MR weight
+    value: 2                                                 # MR weight
 
   # ===== Model architecture flags =====
   bert_pool_last_hidden:
