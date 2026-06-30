@@ -7,7 +7,7 @@
 | **Branch** | `master` |
 | **Status** | ✅ Auto-tracked (cần điền Observations + Conclusion) |
 | **Duration** | <!-- AUTO:duration -->
-2.804h
+2.959h
 <!-- /AUTO --> |
 
 ---
@@ -283,14 +283,14 @@ python training/forgetmi_loku.py --config config.yaml --fresh --exp baseline_mim
 <!-- AUTO:metrics -->
 | Metric | Value | Δ vs Paper (3%) |
 |---|---|---|
-| MIA_persample ↓ | **0.433** | (LoKU per-sample SVM) |
-| MIA_paper ↓ | **0.857** | +0.286 ❌ |
-| Forget AUC ↓ | **0.571** | -0.164 ✅ |
-| Forget F1 ↓ | **0.172** | -0.221 ✅ |
-| Test AUC ↑ | **0.651** | +0.026 ✅ |
-| Test F1 ↑ | **0.172** | -0.078 ❌ |
-| 1−CosSim ↓ | **0.394** | -0.056 ✅ |
-| Time (h) | **2.804** | -2.196 ✅ |
+| MIA_persample ↓ | **0.493** | (LoKU per-sample SVM) |
+| MIA_paper ↓ | **1.000** | +0.429 ❌ |
+| Forget AUC ↓ | **0.561** | -0.174 ✅ |
+| Forget F1 ↓ | **0.156** | -0.237 ✅ |
+| Test AUC ↑ | **0.632** | +0.007 ✅ |
+| Test F1 ↑ | **0.156** | -0.094 ❌ |
+| 1−CosSim ↓ | **0.458** | +0.008 ❌ |
+| Time (h) | **2.959** | -2.041 ✅ |
 | GPU peak (GB) | **8.49** | — |
 | Trainable params | **100.000%** | (vs 100% paper) |
 
