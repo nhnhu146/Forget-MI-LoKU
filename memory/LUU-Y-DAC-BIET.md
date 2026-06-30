@@ -25,8 +25,8 @@ metadata:
 ## 2. TRẠNG THÁI HIỆN TẠI + ĐANG CHỜ
 - **Deadline ~1 tuần (từ 2026-06-30)**. Bắt buộc có **IU-CXR 3% rút gọn** (1–2 seed); IU đầy đủ đã cắt.
 - **⏳ ĐANG CHỜ (quan trọng)**: kết quả **baseline 3% MIMIC (1 seed)** chạy lại với config đúng paper (weights 1/1/2/2). Repo CSV `results_summary_kaggle.csv` đã reset header-only + xóa summary cũ → user phải chạy trong **session Kaggle MỚI** để Cell 1 khôi phục CSV sạch. Kiểm tra **Df_AUC≈0.735, MIA≈0.571**; chưa khớp → đổi lr 1e-5→1e-4. Cả `config_baseline_kaggle.yaml` và `config_baseline_iu_kaggle.yaml` đều đã sửa weights về 1/1/2/2.
-- **🔬 ĐANG SONG SONG**: chạy IU (preprocess CPU → train og+re GPU → baseline IU 3% → LoKU IU 3%) trên account khác trong lúc chờ baseline MIMIC. Xem `HUONG_DAN_IU.md`.
-- **Config LoKU đã chốt**: `D_combo_aggressive` (IHL=1.25, img=0.5, 8ep, kappa=2.0) — quên lành mạnh (forget_ce≈test_ce), thắng số paper. Mới seed 42, cần multi-seed (123, 7).
+- **⏳ ĐANG CHỜ (IU)**: user tạo dataset **`forget-mi-data-iu`** từ preprocess. Preprocess đã chạy OK (3826 report, 7426 ảnh) + đã fix: header all_data.tsv, dò ảnh đệ quy (raddar nest `images/images_normalized`), và **`--link_mode copy`** (Kaggle KHÔNG follow symlink → phải copy ảnh thật ~2GB). Khi tạo dataset chỉ chọn folder `data_iu`. Sau đó mới train og+re → baseline IU → LoKU IU. Xem `HUONG_DAN_IU.md`.
+- **Config LoKU đã chốt**: `D_combo_aggressive` (IHL=1.25, img=0.5, 8ep, kappa=2.0) — quên lành mạnh (forget_ce≈test_ce), thắng số paper. Mới seed 42, cần multi-seed (123, 7). Sweep: `run_kaggle_loku_sweep.ipynb` chưa có push-mỗi-config (timeout mất việc); 10% mới A–G (thiếu H/I/J).
 - **Đã xong & trên GitHub**: code LoKU chạy được Kaggle; sweep 27 config (seed 42). **Chưa**: baseline đúng-paper (đang chạy lại), LoKU-D multi-seed, toàn bộ IU 3%.
 
 ## 3. CÁCH TÍNH MIA
