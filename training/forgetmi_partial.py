@@ -230,16 +230,20 @@ def build_dataset(args, tokenizer, image_noise_params=None):
     forget_img_txt_ids, forget_img_labels = _filter_valid(forget_img_txt_ids, forget_img_labels, all_txt_tokens,   'forget')
     rand_img_txt_ids,   rand_img_labels   = _filter_valid(rand_img_txt_ids,   rand_img_labels,   noisy_txt_tokens, 'random')
 
-    # Loud error if filter wiped everything (cache totally stale): silent no-op would
-    # otherwise produce a trained-on-nothing model that still passes all eval gates.
-    for name, dct in [('retain', retain_img_txt_ids), ('validation', val_img_txt_ids),
-                      ('test', test_img_txt_ids), ('forget', forget_img_txt_ids),
-                      ('random', rand_img_txt_ids)]:
-        if not dct:
+    # Loud error if filter wiped a set that SHOULD have had items (cache totally stale):
+    # silent no-op would otherwise produce a trained-on-nothing model that still passes
+    # all eval gates. Use the pre-filter counts so a legitimately-empty set is allowed:
+    # og training uses an empty forget_set (forget=0), and random can be 0 by config.
+    for name, dct, n_pre in [('retain', retain_img_txt_ids, n_retain),
+                             ('validation', val_img_txt_ids, n_val),
+                             ('test', test_img_txt_ids, n_test),
+                             ('forget', forget_img_txt_ids, n_forget),
+                             ('random', rand_img_txt_ids, n_rand)]:
+        if n_pre > 0 and not dct:
             raise RuntimeError(
-                f"After filter '{name}' set is EMPTY — cached text features in "
-                f"{args.text_data_dir} don't match study_ids in {args.data_split_path}. "
-                f"Set reprocess_input_data=true or delete the cache files in text_data_dir."
+                f"After filter '{name}' set is EMPTY (had {n_pre} before filter) — cached "
+                f"text features in {args.text_data_dir} don't match study_ids in "
+                f"{args.data_split_path}. Set reprocess_input_data=true or delete the cache."
             )
 
     '''
