@@ -192,7 +192,9 @@ def build_dataset(args, tokenizer, image_noise_params=None):
         try:
             features, noisy_features = _regen_to(args.text_data_dir)
             print(f"Saving features into cached file {cached_features_file}")
-        except (PermissionError, OSError):
+        except (PermissionError, OSError, RuntimeError):
+            # torch.save trên read-only FS ném RuntimeError (PyTorchFileWriter C++),
+            # KHÔNG phải OSError → phải bắt cả RuntimeError. (Kaggle /kaggle/input read-only.)
             writable = '/kaggle/working/text_cache_regen' if os.path.isdir('/kaggle/working') else os.path.join(os.getcwd(), 'text_cache_regen')
             print(f"⚠️  text_data_dir read-only → regenerating to {writable}")
             features, noisy_features = _regen_to(writable)
