@@ -106,15 +106,15 @@ parameters:
   noise_std:
     value: 0.1
 
-  # ===== Loss weights — "Unimodal" setting (same as MIMIC baseline) =====
+  # ===== Loss weights — ĐÚNG config.yaml GỐC của paper (1/1/2/2), khớp baseline MIMIC =====
   alpha:
-    value: 4                                                 # UR
+    value: 1                                                 # UKR (giữ uni)
   beta:
-    value: 4                                                 # UU
+    value: 1                                                 # UU (quên uni)
   theta:
-    value: 1                                                 # MU
+    value: 2                                                 # MD (quên multi)
   gamma:
-    value: 1                                                 # MR
+    value: 2                                                 # MKR (giữ multi)
 
   # ===== Model architecture flags =====
   bert_pool_last_hidden:

@@ -24,9 +24,10 @@ metadata:
 
 ## 2. TRẠNG THÁI HIỆN TẠI + ĐANG CHỜ
 - **Deadline ~1 tuần (từ 2026-06-30)**. Bắt buộc có **IU-CXR 3% rút gọn** (1–2 seed); IU đầy đủ đã cắt.
-- **ĐANG CHỜ**: user chạy lại **baseline 3% (1 seed)** trên Kaggle với config đã sửa → kiểm tra **Df_AUC≈0.735, MIA≈0.571**. Khớp → chạy 6%/10%; chưa khớp → đổi lr 1e-5→1e-4.
+- **⏳ ĐANG CHỜ (quan trọng)**: kết quả **baseline 3% MIMIC (1 seed)** chạy lại với config đúng paper (weights 1/1/2/2). Repo CSV `results_summary_kaggle.csv` đã reset header-only + xóa summary cũ → user phải chạy trong **session Kaggle MỚI** để Cell 1 khôi phục CSV sạch. Kiểm tra **Df_AUC≈0.735, MIA≈0.571**; chưa khớp → đổi lr 1e-5→1e-4. Cả `config_baseline_kaggle.yaml` và `config_baseline_iu_kaggle.yaml` đều đã sửa weights về 1/1/2/2.
+- **🔬 ĐANG SONG SONG**: chạy IU (preprocess CPU → train og+re GPU → baseline IU 3% → LoKU IU 3%) trên account khác trong lúc chờ baseline MIMIC. Xem `HUONG_DAN_IU.md`.
 - **Config LoKU đã chốt**: `D_combo_aggressive` (IHL=1.25, img=0.5, 8ep, kappa=2.0) — quên lành mạnh (forget_ce≈test_ce), thắng số paper. Mới seed 42, cần multi-seed (123, 7).
-- **Đã xong & trên GitHub**: code LoKU chạy được Kaggle; sweep 27 config (seed 42); baseline cũ 3/6/10%×3seed (đang làm lại đúng weights). **Chưa**: baseline đúng-paper, LoKU-D multi-seed, toàn bộ IU 3%.
+- **Đã xong & trên GitHub**: code LoKU chạy được Kaggle; sweep 27 config (seed 42). **Chưa**: baseline đúng-paper (đang chạy lại), LoKU-D multi-seed, toàn bộ IU 3%.
 
 ## 3. CÁCH TÍNH MIA
 - Đặc trưng = cross-entropy **nhánh ảnh (img_logits)** thôi. `SVC(C=3,rbf)` tách retain(member=1)/test(non-member=0) → **MIA = tỉ lệ forget bị đoán "member"** ∈ [0,1].
