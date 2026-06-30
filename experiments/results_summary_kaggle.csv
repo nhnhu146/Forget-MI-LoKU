@@ -1,10 +1,1 @@
 MIA,MIA_paper,forget_ce,test_ce,Df_AUC,Df_F1,Dt_AUC,Dt_F1,dist_vs_re,cossim_vs_re,unlearn_time_hours,gpu_peak_GB,trainable_params,total_params,trainable_ratio,id,forget_pct,seed,method,timestamp
-0.433,0.857,4.738,3.049,0.571,0.172,0.651,0.277,0.394,0.6059,2.804,8.49,113238164,113238164,1.0,baseline_mimic_3per,forget_set_3per.csv,42,baseline_partial,2026-06-24 10:56:14
-0.234,0.857,4.736,3.047,0.571,0.172,0.651,0.277,0.38,0.6199,2.886,8.49,113238164,113238164,1.0,baseline_mimic_3per,forget_set_3per.csv,123,baseline_partial,2026-06-24 17:56:41
-0.398,0.857,4.736,3.047,0.571,0.172,0.651,0.277,0.378,0.6216,2.87,8.49,113238164,113238164,1.0,baseline_mimic_3per,forget_set_3per.csv,7,baseline_partial,2026-06-24 21:00:58
-0.431,0.769,2.719,2.271,0.661,0.368,0.65,0.332,0.431,0.5691,3.291,8.49,113238164,113238164,1.0,baseline_mimic_6per,forget_set_6per.csv,42,baseline_partial,2026-06-25 08:00:51
-0.374,0.769,2.72,2.271,0.661,0.377,0.65,0.332,0.375,0.6247,3.291,8.49,113238164,113238164,1.0,baseline_mimic_6per,forget_set_6per.csv,123,baseline_partial,2026-06-25 13:15:59
-0.451,0.769,2.72,2.271,0.661,0.377,0.65,0.332,0.397,0.6032,3.295,8.49,113238164,113238164,1.0,baseline_mimic_6per,forget_set_6per.csv,7,baseline_partial,2026-06-25 16:45:58
-0.589,0.909,2.454,2.426,0.764,0.385,0.654,0.322,0.429,0.5705,3.838,8.49,113238164,113238164,1.0,baseline_mimic_10per,forget_set_10per.csv,42,baseline_partial,2026-06-27 22:01:06
-0.613,0.909,2.454,2.426,0.764,0.385,0.654,0.322,0.414,0.5856,3.85,8.49,113238164,113238164,1.0,baseline_mimic_10per,forget_set_10per.csv,123,baseline_partial,2026-06-28 02:05:33
-0.577,0.909,2.455,2.426,0.764,0.385,0.654,0.322,0.43,0.57,3.656,8.49,113238164,113238164,1.0,baseline_mimic_10per,forget_set_10per.csv,7,baseline_partial,2026-06-30 (recovered from log)
