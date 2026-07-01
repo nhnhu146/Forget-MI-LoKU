@@ -31,14 +31,14 @@ metadata:
 ### ⏳ ĐANG CHỜ (cập nhật khi xong thì XÓA dòng đó)
 1. **baseline 3% MIMIC re-run có per-epoch eval** (account hoangnhu2) → lấy `perepoch_*.csv` (quỹ đạo Df_AUC/MIA theo epoch). E29 đã có (0.561); re-run để có TRAJECTORY dò epoch khớp paper. RNG được khôi phục nên E29 không đổi.
 2. **baseline 6% + 10% MIMIC** — chạy SONG SONG account khác, **mỗi account 1 %** (per-epoch eval làm mỗi run ~4.5h → cả 3 không vừa 12h). Cờ: account B `RUN_6PER=True` (tắt 3/10), account C `RUN_10PER=True` (tắt 3/6). Paper ref Df_AUC 0.654(6%)/0.656(10%). Để ý log gold `model_retrained_6per/10per` (nếu fallback→3per thì dist_vs_re vô nghĩa).
-3. **Tạo dataset model IU**: og→`forget-mi-models-iu`, re→`forget-mi-models-iu-re` (2 dataset riêng vì cùng account hoangnhu03 không trùng tên được). Mỗi cái: **Quick Save** session tương ứng → Create Dataset. Detection đã fix: baseline gom mọi `forget-mi-models-iu*` (commit e902dbb), loku dùng glob đệ quy sẵn → cả 2 nhận được.
-4. **IU baseline 3% + LoKU IU 3%** (og+re đã xong). Attach: forget-mi-data-iu + raddar + forget-mi-models-iu + forget-mi-models-iu-re.
-5. **LoKU-D multi-seed** (123, 7) @ 3/6/10% — HOÃN (chưa gấp).
+3. **IU baseline 3% + LoKU IU 3%**. baseline IU **ĐANG CHẠY** (vừa fix 3 bug `models_root=''`: readiness/`_check_gold`/print — commit fb9b728). LoKU IU chưa chạy. Attach 4 dataset: forget-mi-data-iu + raddar + forget-mi-models-iu + forget-mi-models-iu-re. ⚠️ account hoangnhu03 **THIẾU Secret** GITHUB_TOKEN → nhớ tải kết quả (+`perepoch_*.csv`) thủ công hoặc thêm Secret.
+4. **LoKU-D multi-seed** (123, 7) @ 3/6/10% — HOÃN (chưa gấp).
 
 ### ✅ ĐÃ XONG (khỏi chờ)
 - **baseline 3% MIMIC** seed42 first result: Df_AUC 0.561 (over-forget E29) — xem mục 1.
 - **IU preprocess** → `forget-mi-data-iu` (metadata, `--link_mode skip`, ~3MB). Ảnh dùng raddar trực tiếp.
 - **IU og + re model**: og (`model_og_IU`) 15 epoch 110min val_acc~1.0; re (`model_retrained_iu_3per`) 15 epoch 108.7min val_acc~1.0 (train trên train−forget3%: 6130 vs og 6321). Cùng 15 epoch/setup → mốc vàng công bằng. Cả 2 đã train xong (453MB mỗi cái).
+- **IU model datasets ĐÃ TẠO**: og→`forget-mi-models-iu` (lồng 2 lớp `forget-mi-models-iu/forget-mi-models-iu/base_model/...`, glob `**` tự xử lý), re→`forget-mi-models-iu-re`. Baseline sửa để nhận 2 dataset riêng (e902dbb) + fix bug `models_root=''` 3 chỗ (fb9b728); loku sẵn ổn (glob đệ quy).
 - code LoKU chạy Kaggle + sweep 27 config (seed 42), config D chốt: `D_combo_aggressive` (IHL=1.25, img=0.5, 8ep, kappa=2.0), quên lành mạnh.
 
 ### Workflow IU (tham chiếu): preprocess(skip) → train og+re (warm-start MIMIC, attach raddar) → tạo 2 dataset model → baseline IU + LoKU IU. Mỗi run IU attach: **forget-mi-data-iu + raddar/chest-xrays-indiana-university** (+ model IU). Xem `HUONG_DAN_IU.md`.
