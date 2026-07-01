@@ -796,7 +796,8 @@ def _init_wandb(my_config):
 
 
 def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained,
-                      dataset, elapsed_h, trainable, total_params, tracker=None):
+                      dataset, elapsed_h, trainable, total_params, tracker=None,
+                      method='baseline_partial'):
     """Final eval block — port từ forgetmi_loku.py để có đầy đủ 12 metrics cho luận văn.
 
     Tái sử dụng các helper trong forgetmi_loku (run_mia, cosine_sim_models, perf_metrics)
@@ -914,7 +915,7 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
            'id': str(getattr(config, 'id', '')),
            'forget_pct': os.path.basename(config.forget_set_path),
            'seed': int(config.random_seed),
-           'method': 'baseline_partial',
+           'method': method,
            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     new_file = not os.path.exists(csv_path)
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
