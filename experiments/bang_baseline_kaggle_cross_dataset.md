@@ -1,6 +1,6 @@
 # Bảng baseline Kaggle — Cross-dataset (MIMIC + IU)
 
-_Auto-generated từ `/kaggle/working/results_summary.csv` — 2026-06-30 17:22_
+_Auto-generated từ `/kaggle/working/results_summary.csv` — 2026-07-01 04:03_
 
 Bảng chứa BASELINE Forget-MI trên Kaggle cho cả 2 datasets.
 Để so với LoKU, merge CSV này với CSV từ Colab.
@@ -17,3 +17,10 @@ Bảng chứa BASELINE Forget-MI trên Kaggle cho cả 2 datasets.
 
 | MIMIC-CXR | 10% | Paper | 0.810 | 0.656 | 0.313 | 0.565 | 0.252 | — | 5.000 |
 | MIMIC-CXR | 10% | _(chưa chạy)_ | — | — | — | — | — | — | — |
+
+| **Indiana University CXR** | | |  |  |  |  |  |  |  |
+| Indiana University CXR | 3% | _(chưa chạy)_ | — | — | — | — | — | — | — |
+
+| Indiana University CXR | 6% | _(chưa chạy)_ | — | — | — | — | — | — | — |
+
+| Indiana University CXR | 10% | _(chưa chạy)_ | — | — | — | — | — | — | — |
