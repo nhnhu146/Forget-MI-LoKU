@@ -1,6 +1,6 @@
 # Bảng baseline Kaggle — Cross-dataset (MIMIC + IU)
 
-_Auto-generated từ `/kaggle/working/results_summary.csv` — 2026-07-01 08:51_
+_Auto-generated từ `/kaggle/working/results_summary.csv` — 2026-07-01 17:09_
 
 Bảng chứa BASELINE Forget-MI trên Kaggle cho cả 2 datasets.
 Để so với LoKU, merge CSV này với CSV từ Colab.
