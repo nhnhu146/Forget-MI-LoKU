@@ -27,6 +27,7 @@ output_dir=/kaggle/working/baseline_output"
 """
 import argparse
 import copy
+import itertools
 import os
 import sys
 import time
@@ -98,8 +99,8 @@ def main():
     ap.add_argument('--override', default='')
     ap.add_argument('--epochs', type=int, default=30)
     ap.add_argument('--lr', type=float, default=None)
-    ap.add_argument('--neggrad_lambda', type=float, default=1.0,
-                    help='Trọng số cho số hạng −CE(forget) của NegGrad+')
+    ap.add_argument('--neggrad_lambda', type=float, default=None,
+                    help='Trọng số -CE(forget) NegGrad+ (default = |Df|/|Dr| → nhẹ, khớp chuẩn; tránh phân kỳ)')
     cli = ap.parse_args()
 
     _set_seed(cli.seed)
@@ -158,14 +159,19 @@ def main():
     params = [p for p in model_ul.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=wd)
 
-    # retain lấy mẫu = kích thước forget MỖI epoch (khớp setup paper) → nhanh + công bằng.
+    # FULL retain mỗi epoch (chuẩn cho FT/GA baseline): retain (6010) ÁP ĐẢO forget (201) →
+    # KHÔNG over-forget, khớp Table 1 nơi các baseline này gần như không unlearn. forget được cycle.
     retain_loader = DataLoader(
-        retain_set,
-        sampler=RandomSampler(retain_set, replacement=True, num_samples=n_forget),
+        retain_set, sampler=RandomSampler(retain_set),
         batch_size=bs, num_workers=workers, pin_memory=True)
     forget_loader = DataLoader(
         forget_set, sampler=RandomSampler(forget_set),
         batch_size=bs, num_workers=workers, pin_memory=True)
+    # NegGrad+: trọng số forget mặc định = tỉ lệ |Df|/|Dr| → negation NHẸ (chuẩn), tránh phân kỳ.
+    neg_lambda = (cli.neggrad_lambda if cli.neggrad_lambda is not None
+                  else n_forget / max(1, len(retain_set)))
+    if cli.method == 'neggrad':
+        print(f"   NegGrad+ lambda(forget) = {neg_lambda:.4f}")
 
     model_ul.train()
     t0 = time.time()
@@ -173,9 +179,10 @@ def main():
     for epoch in range(cli.epochs):
         run_loss, n = 0.0, 0
         if cli.method == 'neggrad':
-            steps = min(len(forget_loader), len(retain_loader))
-            pbar = tqdm(zip(forget_loader, retain_loader), total=steps, desc=f"E{epoch:02d}/{cli.epochs}")
-            for f_batch, r_batch in pbar:
+            f_iter = itertools.cycle(forget_loader)  # FULL retain, forget cycled
+            pbar = tqdm(retain_loader, total=len(retain_loader), desc=f"E{epoch:02d}/{cli.epochs}")
+            for r_batch in pbar:
+                f_batch = next(f_iter)
                 f_in, f_lab, _ = get_model_inputs(config, f_batch, device)
                 r_in, r_lab, _ = get_model_inputs(config, r_batch, device)
                 f_lab = f_lab.long().view(-1)
@@ -183,7 +190,7 @@ def main():
                 optimizer.zero_grad()
                 r_out = model_ul(**r_in)
                 f_out = model_ul(**f_in)
-                loss = _ce(r_out, r_lab) - cli.neggrad_lambda * _ce(f_out, f_lab)
+                loss = _ce(r_out, r_lab) - neg_lambda * _ce(f_out, f_lab)
                 loss.backward()
                 nn.utils.clip_grad_norm_(params, max_grad_norm)
                 optimizer.step()
