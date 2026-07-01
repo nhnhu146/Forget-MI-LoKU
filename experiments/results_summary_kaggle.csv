@@ -1,2 +1,3 @@
 MIA,MIA_paper,forget_ce,test_ce,Df_AUC,Df_F1,Dt_AUC,Dt_F1,dist_vs_re,cossim_vs_re,unlearn_time_hours,gpu_peak_GB,trainable_params,total_params,trainable_ratio,id,forget_pct,seed,method,timestamp
 0.493,1.0,4.807,3.446,0.561,0.156,0.632,0.234,0.458,0.5415,2.959,8.49,113238164,113238164,1.0,baseline_mimic_3per,forget_set_3per.csv,42,baseline_partial,2026-06-30 11:24:11
+0.0,0.0,54.336,5.263,0.049,0.0,0.637,0.365,0.467,0.5329,3.441,15.06,113238164,113238164,1.0,neggrad_mimic_3per,forget_set_3per.csv,42,neggrad,2026-07-01 13:37:02
