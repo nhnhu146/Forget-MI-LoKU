@@ -32,7 +32,9 @@ metadata:
 1. **baseline 3% MIMIC re-run có per-epoch eval** (account hoangnhu2) → lấy `perepoch_*.csv` (quỹ đạo Df_AUC/MIA theo epoch). E29 đã có (0.561); re-run để có TRAJECTORY dò epoch khớp paper. RNG được khôi phục nên E29 không đổi.
 2. **baseline 6% + 10% MIMIC** — chạy SONG SONG account khác, **mỗi account 1 %** (per-epoch eval làm mỗi run ~4.5h → cả 3 không vừa 12h). Cờ: account B `RUN_6PER=True` (tắt 3/10), account C `RUN_10PER=True` (tắt 3/6). Paper ref Df_AUC 0.654(6%)/0.656(10%). Để ý log gold `model_retrained_6per/10per` (nếu fallback→3per thì dist_vs_re vô nghĩa).
 3. **IU baseline 3% + LoKU IU 3%**. baseline IU **ĐANG CHẠY** (vừa fix 3 bug `models_root=''`: readiness/`_check_gold`/print — commit fb9b728). LoKU IU chưa chạy. Attach 4 dataset: forget-mi-data-iu + raddar + forget-mi-models-iu + forget-mi-models-iu-re. ⚠️ account hoangnhu03 **THIẾU Secret** GITHUB_TOKEN → nhớ tải kết quả (+`perepoch_*.csv`) thủ công hoặc thêm Secret.
-4. **LoKU-D multi-seed** (123, 7) @ 3/6/10% — HOÃN (chưa gấp).
+4. **Unlearning baselines NegGrad+/CF-k/EU-k** (Forget-MI Table 1) — CODE XONG (`scripts/unlearn_baselines.py` + cell runner trong baseline notebook, commit 56b1c12). Cùng pipeline/eval/seed, eval 1 lần cuối (KHÔNG per-epoch) → nhanh (~10-20p/method). Chạy MIMIC 3% trước: cell "UNLEARNING BASELINES" (`RUN_UNLEARN_BASELINES=True`, methods neggrad/cfk/euk). Paper @3%: cả 3 **MIA≈1.0, Df_AUC≈1.0** (quên KÉM) → làm nổi LoKU. CSV ghi method=neggrad/cfk/euk (dedup đã thêm 'method'). Rồi mở rộng 6/10% + IU.
+5. **LoKU-D multi-seed** (123, 7) @ 3/6/10% — HOÃN (chưa gấp).
+6. **Bảng so sánh cuối** gồm mọi method (Retrain|NegGrad+|CF-k|EU-k|Forget-MI|LoKU) — dựng sau khi có đủ số trong CSV.
 
 ### ✅ ĐÃ XONG (khỏi chờ)
 - **baseline 3% MIMIC** seed42 first result: Df_AUC 0.561 (over-forget E29) — xem mục 1.
