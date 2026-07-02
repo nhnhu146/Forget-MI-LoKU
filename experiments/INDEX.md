@@ -43,7 +43,7 @@ Sắp xếp theo thứ tự thời gian (mới nhất ở dưới). Auto-tracker
 | 025 | baseline_mimic_3per_seed42 | 2026-06-30 | 🔄 | 0.493 | 0.561 | 0.156 | 0.632 | 0.156 | 2.959 | 100.000% | _(auto, cần kết luận)_ |
 | 026 | baseline_mimic_3per_seed123 | 2026-06-24 | 🔄 | 0.234 | 0.571 | 0.172 | 0.651 | 0.172 | 2.886 | 100.000% | _(auto, cần kết luận)_ |
 | 027 | baseline_mimic_3per_seed7 | 2026-06-24 | 🔄 | 0.398 | 0.571 | 0.172 | 0.651 | 0.172 | 2.870 | 100.000% | _(auto, cần kết luận)_ |
-| 061 | loku_iu_3per_seed42 | 2026-07-02 | 🔄 | 0.848 | 0.951 | 0.874 | 0.667 | 0.628 | 0.087 | 0.451% | _(auto, cần kết luận)_ |
+| 061 | loku_iu_3per_seed42 | 2026-07-02 | 🔄 | 0.848 | 0.951 | 0.874 | 0.667 | 0.628 | 0.068 | 0.451% | _(auto, cần kết luận)_ |
 
 **Reference (paper Forget-MI, 3%)**: MIA=0.571 | Df_AUC=0.735 | Df_F1=0.393 | Dt_AUC=0.625 | Dt_F1=0.250 | Time=5h | Trainable=100%
 
