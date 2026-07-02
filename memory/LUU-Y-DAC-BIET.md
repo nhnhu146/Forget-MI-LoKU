@@ -30,7 +30,7 @@ metadata:
 - **Deadline ~1 tuần (từ 2026-06-30)**. Bắt buộc có **IU-CXR 3% rút gọn** (1–2 seed); IU đầy đủ đã cắt.
 ### ⏳ ĐANG CHỜ (cập nhật khi xong thì XÓA dòng đó)
 1. **baseline 3% MIMIC re-run có per-epoch eval** (account hoangnhu2) → lấy `perepoch_*.csv` (quỹ đạo Df_AUC/MIA theo epoch). E29 đã có (0.561); re-run để có TRAJECTORY dò epoch khớp paper. RNG được khôi phục nên E29 không đổi.
-2. **LoKU IU 3%** — chưa chạy. `run_kaggle_loku.ipynb` Cell 4d (RUN_IU_LOKU=True, SEEDS_IU=(42,), config D). Attach 4 dataset: forget-mi-data-iu + raddar + forget-mi-models-iu + forget-mi-models-iu-re.
+2. **LoKU IU 3%** — chạy lần 1 QUÊN KÉM (Df_AUC 0.951, forget_ce 0.613≪test_ce 2.170) vì `early_stop='val'` dừng ở E4 (unlearning luôn tăng val_CE → không cải thiện → dừng sớm). **ĐÃ SỬA** (commit 5a048f8): `config_loku_iu_kaggle.yaml` → `early_stop_metric='cossim'` (dừng khi gần retrained-gold nhất) + `unlearn_epochs=20`. Dọn row/MD xấu (b7e1fc1) → re-run sạch. **CHỜ chạy lại**: Cell 4d, 4 dataset IU. Kỳ vọng Df_AUC~0.65-0.75, forget_ce≈test_ce. Nếu vẫn kém → tăng ihl. (`fila_partial` bug read-only đã fix 20f99c5.)
 3. **Unlearning baselines cho IU 3%** (neggrad/cfk/euk) — cell "UNLEARNING BASELINES" với `UB_DATASET='iu'`. *Nice-to-have* (bảng cross-dataset đầy đủ); bỏ được nếu hết quota.
 4. **LoKU-D multi-seed** (123, 7) @ 3/6/10% — HOÃN.
 5. **Bảng so sánh cuối** gồm mọi method (Retrain|NegGrad+|CF-k|EU-k|Forget-MI|LoKU) × (MIMIC 3/6/10% + IU 3%) — dựng sau khi đủ số. **user sẽ gửi file thật** exp_028(6%)/exp_058(10%) + CSV hoangnhu4 để verify (tôi đã merge tạm từ số paste).
