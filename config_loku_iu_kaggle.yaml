@@ -65,11 +65,13 @@ parameters:
   weight_decay:
     value: 0.01
   unlearn_epochs:
-    value: 8
+    value: 20                    # IU: nhiều epoch hơn (LoRA 0.45% param + IHL-only → quên chậm)
   early_stop_patience:
     value: 4
   early_stop_metric:
-    value: "val"
+    value: "cossim"              # IU: dừng khi GẦN retrained-gold nhất (điểm quên lành mạnh).
+                                 # 'val' hỏng cho IU (unlearning luôn tăng val_CE → dừng ở E4 chưa quên).
+                                 # cossim dùng F_re (gold có sẵn) — đúng tiêu chí paper "closest to retrained".
   grad_clip:
     value: 1.0
   warmup_proportion:
