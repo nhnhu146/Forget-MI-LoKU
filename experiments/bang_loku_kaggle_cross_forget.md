@@ -1,6 +1,6 @@
 # LoKU Kaggle — Bảng cross-forget%
 
-_Generated: 2026-07-02 03:06_
+_Generated: 2026-07-02 04:06_
 
 Kết quả LoKU multi-seed trên Kaggle T4 (so trực tiếp với baseline cùng GPU).
 
