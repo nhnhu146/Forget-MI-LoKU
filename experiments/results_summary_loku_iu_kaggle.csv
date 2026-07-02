@@ -1,2 +1,1 @@
 MIA,MIA_paper,forget_ce,test_ce,Df_AUC,Df_F1,Dt_AUC,Dt_F1,dist_vs_re,cossim_vs_re,unlearn_time_hours,gpu_peak_GB,trainable_params,total_params,trainable_ratio,id,forget_pct,seed,lora_r,ihl,img_subtract,epochs,kappa_cls_retain,timestamp
-0.848,0.833,0.613,2.17,0.951,0.874,0.667,0.628,0.044,0.9556,0.087,11.78,513032,113745044,0.00451,loku_iu_3per,forget_set_3per_iu.csv,42,8,1.25,0.5,8,2.0,2026-07-02 04:06:04
