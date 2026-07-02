@@ -30,11 +30,10 @@ metadata:
 - **Deadline ~1 tuần (từ 2026-06-30)**. Bắt buộc có **IU-CXR 3% rút gọn** (1–2 seed); IU đầy đủ đã cắt.
 ### ⏳ ĐANG CHỜ (cập nhật khi xong thì XÓA dòng đó)
 1. **baseline 3% MIMIC re-run có per-epoch eval** (account hoangnhu2) → lấy `perepoch_*.csv` (quỹ đạo Df_AUC/MIA theo epoch). E29 đã có (0.561); re-run để có TRAJECTORY dò epoch khớp paper. RNG được khôi phục nên E29 không đổi.
-2. **baseline 6% + 10% MIMIC** — chạy SONG SONG account khác, **mỗi account 1 %, MỖI SESSION 1 %** (per-epoch eval ~**9.5h/run** → 2 mức trong 1 session sẽ timeout — ĐÃ xảy ra: 6% dừng ở E09 vì 3% chạy trước 9h). Cho 6/10% **nên TẮT** `EVAL_EVERY_EPOCH=False` → chỉ E29 (~3.5h, chắc vừa 12h) vì đã có quỹ đạo IU 3% minh họa rồi. `forgetmi_partial` KHÔNG resume → timeout là chạy lại từ đầu. Paper ref Df_AUC 0.654(6%)/0.656(10%). `forget=401`⟺6%, `201`⟺3%.
-3. **LoKU IU 3%** — chưa chạy. Attach 4 dataset: forget-mi-data-iu + raddar + forget-mi-models-iu + forget-mi-models-iu-re. (Baseline IU 3% ĐÃ XONG — xem mục dưới.)
-4. **Unlearning baselines NegGrad+/CF-k/EU-k** (Forget-MI Table 1) — CODE XONG (`scripts/unlearn_baselines.py` + cell "UNLEARNING BASELINES", commit 56b1c12). CHỜ user CHẠY: cell đã set sẵn `UB_FORGET=3, UB_METHODS=('neggrad','cfk','euk'), UB_DATASET='mimic', seed 42`. Attach forget-mi-data + forget-mi-models-full. Mỗi method **tự push sau khi xong** (`_push_progress` → resume-able, `_method_done` skip cái đã có). ~10-20p/method, ~1h tổng. Paper @3%: cả 3 **MIA≈1.0, Df_AUC≈1.0** (quên KÉM). CSV method=neggrad/cfk/euk (dedup keyed cả 'method'). Rồi mở 6/10% + IU (đổi UB_FORGET / UB_DATASET).
-5. **LoKU-D multi-seed** (123, 7) @ 3/6/10% — HOÃN (chưa gấp).
-6. **Bảng so sánh cuối** gồm mọi method (Retrain|NegGrad+|CF-k|EU-k|Forget-MI|LoKU) — dựng sau khi có đủ số trong CSV.
+2. **LoKU IU 3%** — chưa chạy. `run_kaggle_loku.ipynb` Cell 4d (RUN_IU_LOKU=True, SEEDS_IU=(42,), config D). Attach 4 dataset: forget-mi-data-iu + raddar + forget-mi-models-iu + forget-mi-models-iu-re.
+3. **Unlearning baselines cho IU 3%** (neggrad/cfk/euk) — cell "UNLEARNING BASELINES" với `UB_DATASET='iu'`. *Nice-to-have* (bảng cross-dataset đầy đủ); bỏ được nếu hết quota.
+4. **LoKU-D multi-seed** (123, 7) @ 3/6/10% — HOÃN.
+5. **Bảng so sánh cuối** gồm mọi method (Retrain|NegGrad+|CF-k|EU-k|Forget-MI|LoKU) × (MIMIC 3/6/10% + IU 3%) — dựng sau khi đủ số. **user sẽ gửi file thật** exp_028(6%)/exp_058(10%) + CSV hoangnhu4 để verify (tôi đã merge tạm từ số paste).
 
 ### ✅ ĐÃ XONG (khỏi chờ)
 - **baseline 3% MIMIC** seed42 first result: Df_AUC 0.561 (over-forget E29) — xem mục 1.
@@ -42,7 +41,8 @@ metadata:
 - **IU og + re model**: og (`model_og_IU`) 15 epoch 110min val_acc~1.0; re (`model_retrained_iu_3per`) 15 epoch 108.7min val_acc~1.0 (train trên train−forget3%: 6130 vs og 6321). Cùng 15 epoch/setup → mốc vàng công bằng. Cả 2 đã train xong (453MB mỗi cái).
 - **IU model datasets ĐÃ TẠO**: og→`forget-mi-models-iu` (lồng 2 lớp `forget-mi-models-iu/forget-mi-models-iu/base_model/...`, glob `**` tự xử lý), re→`forget-mi-models-iu-re`. Baseline sửa để nhận 2 dataset riêng (e902dbb) + fix bug `models_root=''` 3 chỗ (fb9b728); loku sẵn ổn (glob đệ quy).
 - **baseline IU 3% seed42 XONG** (recover từ Save Version, commit 50fdfc2): Df_AUC 0.653, Dt_AUC 0.636, MIA_persample 0.565, forget_ce 4.718>test_ce 3.355 (over-forget E29 giống MIMIC). `perepoch_baseline_iu_3per.csv` đủ 30 epoch → điểm quên-lành-mạnh (forget_ce≈test_ce) ~E21, Df_AUC~0.77.
-- **unlearn baselines MIMIC 3% (full retain, commit 2b4146c)**: CF-k Df_AUC **0.927** ✅ (không unlearn, ~paper). EU-k 0.545 (undertrained @15ep → chạy lại 30ep). NegGrad+ 0.049 forget_ce=54 → **PHÂN KỲ** (unbounded GA); user chọn **(A) báo cáo trung thực** over-forget, KHÔNG chạy lại.
+- **unlearn baselines MIMIC 3% (full retain)**: CF-k Df_AUC **0.927** ✅ (không unlearn, ~paper). **EU-k 30ep = 0.555** ✅ (≈ Retrain gold 0.566 — hợp lý, EU-k là retrain-like; test AUC 0.590 hơi tụt do overfit; khác paper 0.996 nhưng reimplement hợp lệ). NegGrad+ 0.049 forget_ce=54 → **PHÂN KỲ** (unbounded GA); user chọn **(A) báo cáo trung thực**, KHÔNG chạy lại.
+- **baseline MIMIC 6% + 10% XONG** (E29, no per-epoch): **6% Df_AUC 0.679** (≈paper 0.654, forget_ce 2.476≈test_ce 2.250 = LÀNH MẠNH ✅), **10% Df_AUC 0.757** (>paper 0.656, forget_ce<test_ce, quên nhẹ hơn). → Pattern: 3% over-forget (0.561) nhưng **6/10% lành mạnh sát paper** (forget lớn → unlearning ổn định hơn). Merge tạm từ paste (commit 6e8e792); chờ file thật + exp_028/exp_058 MD.
 - code LoKU chạy Kaggle + sweep 27 config (seed 42), config D chốt: `D_combo_aggressive` (IHL=1.25, img=0.5, 8ep, kappa=2.0), quên lành mạnh.
 
 ### Workflow IU (tham chiếu): preprocess(skip) → train og+re (warm-start MIMIC, attach raddar) → tạo 2 dataset model → baseline IU + LoKU IU. Mỗi run IU attach: **forget-mi-data-iu + raddar/chest-xrays-indiana-university** (+ model IU). Xem `HUONG_DAN_IU.md`.
