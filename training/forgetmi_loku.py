@@ -226,7 +226,9 @@ def build_dataset(args, tokenizer):
         # Thử ghi vào text_data_dir; nếu read-only (Kaggle input) → fallback writable dir.
         try:
             features, noisy_features = _regen_to(args.text_data_dir)
-        except (PermissionError, OSError):
+        except (PermissionError, OSError, RuntimeError):
+            # torch.save trên read-only FS ném RuntimeError (PyTorchFileWriter C++),
+            # KHÔNG phải OSError → phải bắt cả RuntimeError. (Kaggle /kaggle/input read-only.)
             wd = _writable_cache_dir()
             print(f"⚠️  text_data_dir read-only → regenerating to {wd}")
             features, noisy_features = _regen_to(wd)
