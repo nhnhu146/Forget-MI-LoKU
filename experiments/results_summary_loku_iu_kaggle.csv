@@ -1,1 +1,6 @@
 MIA,MIA_paper,forget_ce,test_ce,Df_AUC,Df_F1,Dt_AUC,Dt_F1,dist_vs_re,cossim_vs_re,unlearn_time_hours,gpu_peak_GB,trainable_params,total_params,trainable_ratio,id,forget_pct,seed,lora_r,ihl,img_subtract,epochs,kappa_cls_retain,timestamp
+0.613,0.167,0.897,1.278,0.826,0.673,0.678,0.616,0.078,0.9217,0.073,11.78,513032,113745044,0.00451,loku_iu_3per_A_distillre,forget_set_3per_iu.csv,42,8,1.25,0.5,15,2.0,2026-07-02 08:23:00
+0.618,0.0,1.238,1.357,0.795,0.64,0.689,0.624,0.063,0.9374,0.072,11.78,513032,113745044,0.00451,loku_iu_3per_B_distillre_hi,forget_set_3per_iu.csv,42,8,1.25,0.5,15,2.0,2026-07-02 08:43:44
+0.55,0.0,2.901,2.092,0.714,0.462,0.62,0.554,0.078,0.9221,0.128,11.78,513032,113745044,0.00451,loku_iu_3per_C_ihl_high,forget_set_3per_iu.csv,42,8,3.0,0.5,15,2.0,2026-07-02 09:08:24
+0.508,0.0,6.315,3.128,0.403,0.468,0.596,0.563,0.135,0.8652,0.128,11.78,513032,113745044,0.00451,loku_iu_3per_D_neggrad,forget_set_3per_iu.csv,42,8,1.25,0.5,15,2.0,2026-07-02 09:32:41
+0.497,0.0,2.492,1.854,0.648,0.554,0.667,0.604,0.078,0.9217,0.087,11.78,513032,113745044,0.00451,loku_iu_3per_E_combo,forget_set_3per_iu.csv,42,8,2.0,0.5,20,2.0,2026-07-02 09:54:56

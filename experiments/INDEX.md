@@ -44,6 +44,11 @@ Sắp xếp theo thứ tự thời gian (mới nhất ở dưới). Auto-tracker
 | 026 | baseline_mimic_3per_seed123 | 2026-06-24 | 🔄 | 0.234 | 0.571 | 0.172 | 0.651 | 0.172 | 2.886 | 100.000% | _(auto, cần kết luận)_ |
 | 027 | baseline_mimic_3per_seed7 | 2026-06-24 | 🔄 | 0.398 | 0.571 | 0.172 | 0.651 | 0.172 | 2.870 | 100.000% | _(auto, cần kết luận)_ |
 | 061 | loku_iu_3per_seed42 | 2026-07-02 | 🔄 | 0.848 | 0.951 | 0.874 | 0.667 | 0.628 | 0.068 | 0.451% | _(auto, cần kết luận)_ |
+| 063 | loku_iu_3per_a_distillre_seed42 | 2026-07-02 | 🔄 | 0.613 | 0.826 | 0.673 | 0.678 | 0.616 | 0.073 | 0.451% | _(auto, cần kết luận)_ |
+| 064 | loku_iu_3per_b_distillre_hi_seed42 | 2026-07-02 | 🔄 | 0.618 | 0.795 | 0.640 | 0.689 | 0.624 | 0.072 | 0.451% | _(auto, cần kết luận)_ |
+| 065 | loku_iu_3per_c_ihl_high_seed42 | 2026-07-02 | 🔄 | 0.550 | 0.714 | 0.462 | 0.620 | 0.554 | 0.128 | 0.451% | _(auto, cần kết luận)_ |
+| 066 | loku_iu_3per_d_neggrad_seed42 | 2026-07-02 | 🔄 | 0.508 | 0.403 | 0.468 | 0.596 | 0.563 | 0.128 | 0.451% | _(auto, cần kết luận)_ |
+| 067 | loku_iu_3per_e_combo_seed42 | 2026-07-02 | 🔄 | 0.497 | 0.648 | 0.554 | 0.667 | 0.604 | 0.087 | 0.451% | _(auto, cần kết luận)_ |
 
 **Reference (paper Forget-MI, 3%)**: MIA=0.571 | Df_AUC=0.735 | Df_F1=0.393 | Dt_AUC=0.625 | Dt_F1=0.250 | Time=5h | Trainable=100%
 
