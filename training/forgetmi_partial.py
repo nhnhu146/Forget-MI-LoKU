@@ -515,6 +515,10 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
 
     unlearning_start_time = time.time()
 
+    # Định nghĩa trước vòng lặp: khi unlearn_epochs=0 (eval-only θ_og/θ_re) vòng lặp
+    # không chạy nên biến này (bình thường gán lại mỗi epoch) sẽ chưa tồn tại → return crash.
+    retain_dataloader = None
+
     for epoch in unlearning_iterator:
         # ------------------------------------------- UNLEARNING ------------------------------------------- 
         total_loss = 0
