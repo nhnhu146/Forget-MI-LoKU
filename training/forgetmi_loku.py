@@ -1115,14 +1115,19 @@ def main():
         bias='none',
     )
     model_unlearn = get_peft_model(model_unlearn, peft_cfg)
-    apply_loku_soft_init(
-        model_unlearn, f_imp, r_imp, target_modules,
-        r=int(config.lora_r),
-        init_scale=float(getattr(config, 'loku_init_scale', 0.05)),
-        subtract_scale=float(getattr(config, 'loku_subtract_scale', 0.0)),
-        image_target_names=image_set,
-        image_subtract_scale=img_sub_scale,
-    )
+    # ABLATION 'LoRA ngẫu nhiên': bỏ qua Fisher/FILA init → giữ init mặc định của PEFT
+    # (lora_A = kaiming ngẫu nhiên, lora_B = 0). Dùng để cô lập đóng góp của Fisher/FILA.
+    if getattr(config, 'loku_random_init', False):
+        print("🎲 ABLATION: loku_random_init=True → BỎ QUA Fisher/FILA init (LoRA ngẫu nhiên mặc định PEFT)")
+    else:
+        apply_loku_soft_init(
+            model_unlearn, f_imp, r_imp, target_modules,
+            r=int(config.lora_r),
+            init_scale=float(getattr(config, 'loku_init_scale', 0.05)),
+            subtract_scale=float(getattr(config, 'loku_subtract_scale', 0.0)),
+            image_target_names=image_set,
+            image_subtract_scale=img_sub_scale,
+        )
 
     # ----- Unfreeze classifier heads -----
     # Important: LoRA only touches BERT attention, but eval uses outputs[1] = img_logits
