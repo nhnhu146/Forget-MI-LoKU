@@ -413,6 +413,36 @@ def _write_perepoch_row(csv_path, epoch, args, m):
         w.writerow(row)
 
 
+def _append_row_csv(csv_path, row):
+    """Ghi 1 dòng vào CSV, tự MIGRATE header khi row có cột mới (thêm vào cuối header) và
+    LUÔN ghi theo thứ tự header THỰC của file → không bao giờ lệch cột. Row cũ thiếu cột
+    mới thì điền ''. Dùng chung baseline + LoKU để CSV luôn hợp lệ khi schema đổi."""
+    import csv as _csv
+    row_keys = list(row.keys())
+    header = []
+    if os.path.exists(csv_path):
+        with open(csv_path, 'r', newline='') as f:
+            header = next(_csv.reader(f), [])
+    new_cols = [k for k in row_keys if k not in header]
+    if header and new_cols:                       # migrate: rewrite với union header
+        with open(csv_path, 'r', newline='') as f:
+            old_rows = list(_csv.DictReader(f))
+        header = header + new_cols
+        with open(csv_path, 'w', newline='') as f:
+            w = _csv.DictWriter(f, fieldnames=header)
+            w.writeheader()
+            for r in old_rows:
+                w.writerow({k: r.get(k, '') for k in header})
+    write_header = not header
+    if write_header:
+        header = row_keys
+    with open(csv_path, 'a', newline='') as f:
+        w = _csv.DictWriter(f, fieldnames=header, extrasaction='ignore')
+        if write_header:
+            w.writeheader()
+        w.writerow({k: row.get(k, '') for k in header})
+
+
 def _eval_epoch_metrics(args, device, model_ul, model_re, dataset):
     """Eval READ-ONLY tại epoch hiện tại → trả dict metrics (giống final, bỏ phần in).
 
@@ -514,13 +544,17 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
     model_og.train()
 
     unlearning_start_time = time.time()
+    # Bóc tách thời gian: train thuần (forward/backward/step) vs monitor (CosSim per-epoch,
+    # CHỈ để log — không cần cho unlearning) vs ckpt (I/O lưu checkpoint mỗi epoch).
+    t_train = t_monitor = t_ckpt = 0.0
 
     # Định nghĩa trước vòng lặp: khi unlearn_epochs=0 (eval-only θ_og/θ_re) vòng lặp
     # không chạy nên biến này (bình thường gán lại mỗi epoch) sẽ chưa tồn tại → return crash.
     retain_dataloader = None
 
     for epoch in unlearning_iterator:
-        # ------------------------------------------- UNLEARNING ------------------------------------------- 
+        _t_ep = time.time()
+        # ------------------------------------------- UNLEARNING -------------------------------------------
         total_loss = 0
         md_loss, uu_loss = 0, 0
         mkr_loss, ukr_loss = 0, 0
@@ -640,12 +674,13 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
 
         if epoch != 0:
             optimizer.step()
-            optimizer.zero_grad()  
+            optimizer.zero_grad()
+        t_train += time.time() - _t_ep
 
         # ----- Per-epoch CosSim eval (FAITHFUL to original Forget-MI implementation) -----
-        # Runs FULL retain forward through model_ul AND model_re each epoch — this is the
-        # primary contributor to the paper's reported ~5h training time per seed. We keep
-        # it (despite being expensive) to reproduce the published baseline runtime profile.
+        # Runs FULL retain forward through model_ul AND model_re each epoch. Chỉ để LOG
+        # (không dùng cho unlearning/early-stop) → tính vào MONITOR, không phải train.
+        _t_mon = time.time()
         from evaluation.eval_unlearning import get_probability_measure
         try:
             cosine_similarity = get_probability_measure(
@@ -678,20 +713,23 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
         print(f"[E{epoch:02d}/{n_epochs}] loss={total_loss/steps:+.3f} "
               f"UKR={ukr_loss/steps:+.3f} UU={uu_loss/steps:+.3f} "
               f"MD={md_loss/steps:+.3f} MKR={mkr_loss/steps:+.3f} "
-              f"CosSim={cosine_similarity:+.4f} | elapsed={elapsed_min:.1f}m ETA={eta_min:.1f}m")
+              f"CosSim={cosine_similarity:+.4f} | {elapsed_min:.1f}m ETA {eta_min:.1f}m")
+        t_monitor += time.time() - _t_mon
 
         # ----- Per-epoch checkpoint save (FAITHFUL to original) -----
-        # Original saves every epoch. ~450 MB × 30 = ~13.5 GB on /kaggle/working/.
-        # Tight against 20 GB cap but fits; matches paper behavior.
+        # Original saves every epoch. ~450 MB × 30 = ~13.5 GB on /kaggle/working/. I/O → tính CKPT.
+        _t_ck = time.time()
         epoch_output_dir = os.path.join(output_dir, f"epoch_{epoch}")
         os.makedirs(epoch_output_dir, exist_ok=True)
         model_to_save = model_ul.module if hasattr(model_ul, 'module') else model_ul
         torch.save(model_to_save.state_dict(), os.path.join(epoch_output_dir, "model_state_dict.pth"))
+        t_ckpt += time.time() - _t_ck
 
         # ----- Per-epoch eval (READ-ONLY, bật bằng --override eval_every_epoch=1) -----
         # Vẽ quỹ đạo Df_AUC/MIA... theo epoch để dò điểm khớp paper. KHÔNG đụng training:
         # _eval_epoch_metrics khôi phục train-mode/grad/RNG nên E29 vẫn y hệt bản trung thực.
         if getattr(args, 'eval_every_epoch', False):
+            _t_mon2 = time.time()
             _pe = _eval_epoch_metrics(args, device, model_ul, model_re, dataset)
             _pe_csv = os.path.join(os.path.dirname(os.path.dirname(output_dir)),
                                    f"perepoch_{getattr(args, 'id', 'run')}.csv")
@@ -699,19 +737,21 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
             print(f"   📈 [eval E{epoch:02d}] Df_AUC={_pe.get('Df_AUC')} Dt_AUC={_pe.get('Dt_AUC')} "
                   f"MIA={_pe.get('MIA')} MIA_paper={_pe.get('MIA_paper')} "
                   f"fce={_pe.get('forget_ce')} tce={_pe.get('test_ce')}")
+            t_monitor += time.time() - _t_mon2
 
 
-    # ------------------------------------------- Log Unlearning Time Taken -------------------------------------------    
-    unlearning_end_time = time.time()  
-    unlearning_duration = (unlearning_end_time - unlearning_start_time) / 3600
-
+    # ------------------------------------------- Timing breakdown -------------------------------------------
+    wall_h = (time.time() - unlearning_start_time) / 3600
+    timing = {'train_h': t_train / 3600, 'monitor_h': t_monitor / 3600,
+              'ckpt_h': t_ckpt / 3600, 'wall_h': wall_h}
     try:
-        wandb.log({"time(hours)": unlearning_duration})
+        wandb.log({"time(hours)": wall_h, "time/train_h": timing['train_h'],
+                   "time/monitor_h": timing['monitor_h']})
     except Exception:
         pass
-    print(f"⏱  Unlearning training done in {unlearning_duration*60:.1f} min ({unlearning_duration:.2f}h)")
-
-    return retain_dataloader, forget_dataloader, val_dataloader, test_dataloader
+    print(f"⏱  train {timing['train_h']:.3f}h + monitor {timing['monitor_h']:.3f}h "
+          f"+ ckpt {timing['ckpt_h']:.3f}h = wall {wall_h:.3f}h")
+    return timing
     
 def _parse_cli():
     """CLI args added 2026-06-16 for Kaggle/multi-seed compatibility.
@@ -801,17 +841,14 @@ def _init_wandb(my_config):
 
 def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained,
                       dataset, elapsed_h, trainable, total_params, tracker=None,
-                      method='baseline_partial'):
-    """Final eval block — port từ forgetmi_loku.py để có đầy đủ 12 metrics cho luận văn.
+                      method='baseline_partial', timing=None):
+    """Final eval block — port từ forgetmi_loku.py để có đầy đủ metrics cho luận văn.
 
     Tái sử dụng các helper trong forgetmi_loku (run_mia, cosine_sim_models, perf_metrics)
-    để baseline và LoKU dùng CÙNG eval logic → so sánh fair.
+    để baseline và LoKU dùng CÙNG eval logic → so sánh fair. `timing` = dict bóc tách thời
+    gian từ unlearn() (train/monitor/ckpt/fisher/load); None → chỉ hiện elapsed_h.
     """
-    print("\n" + "=" * 60)
-    print("📈 FINAL EVALUATION (baseline Forget-MI)")
-    print("=" * 60)
-
-    # Import helpers từ forgetmi_loku
+    _eval_start = time.time()
     from training.forgetmi_loku import (
         run_mia, cosine_sim_models, perf_metrics, _subsample_dataset
     )
@@ -827,7 +864,6 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
 
     # 1. MIA (per-sample + paper-style)
     try:
-        print("🛡️  Computing MIA scores...")
         mia_res = run_mia(model_unlearn, dataset['retain'], dataset['test'], dataset['forget'],
                           device, config, batch_size=bs,
                           seed=int(config.random_seed), paper_batch_size=paper_bs)
@@ -841,7 +877,6 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
 
     # 2. CosSim vs retrained
     try:
-        print("📐 Computing CosSim vs retrained model...")
         cossim_ds = _subsample_dataset(dataset['retain'], eval_max_retain, int(config.random_seed))
         cossim_re = cosine_sim_models(model_unlearn, model_retrained, cossim_ds, device, config, batch_size=bs)
     except Exception as e:
@@ -850,14 +885,12 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
 
     # 3. Test + Forget perf
     try:
-        print("📊 Performance on test set...")
         test_m = perf_metrics(model_unlearn, dataset['test'], device, config, batch_size=bs)
     except Exception as e:
         print(f"⚠️  Test perf failed: {e}")
         test_m = {'AUC': float('nan'), 'Macro_F1': float('nan'), 'F1': float('nan')}
 
     try:
-        print("📊 Performance on forget set...")
         forget_m = perf_metrics(model_unlearn, dataset['forget'], device, config, batch_size=bs)
     except Exception as e:
         print(f"⚠️  Forget perf failed: {e}")
@@ -865,6 +898,16 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
 
     gpu_peak = (torch.cuda.max_memory_allocated() / 1e9
                 if torch.cuda.is_available() else 0.0)
+    final_eval_h = (time.time() - _eval_start) / 3600
+
+    t = timing or {}
+    train_h   = t.get('train_h', elapsed_h)
+    fisher_h  = t.get('fisher_h', 0.0)
+    monitor_h = t.get('monitor_h', 0.0)
+    ckpt_h    = t.get('ckpt_h', 0.0)
+    load_h    = t.get('load_h', 0.0)
+    wall_h    = t.get('wall_h', elapsed_h)
+    core_h    = train_h + fisher_h              # thời gian unlearning "công bằng" (train + Fisher)
 
     results = {
         'final/MIA':         round(mia, 3),
@@ -877,58 +920,53 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
         'final/Dt_F1':       round(test_m['Macro_F1'], 3),
         'final/dist_vs_re':  round(1 - cossim_re, 3),
         'final/cossim_vs_re': round(cossim_re, 4),
-        'efficiency/unlearn_time_hours': round(elapsed_h, 3),
+        'efficiency/unlearn_time_hours': round(elapsed_h, 3),   # wall (giữ tương thích CSV cũ)
         'efficiency/gpu_peak_GB':        round(gpu_peak, 2),
         'efficiency/trainable_params':   int(trainable),
         'efficiency/total_params':       int(total_params),
         'efficiency/trainable_ratio':    round(trainable / total_params, 5),
+        # --- bóc tách thời gian (thêm ở CUỐI dict để CSV schema-migration an toàn) ---
+        'efficiency/unlearn_core_hours': round(core_h, 3),      # ← số THỜI GIAN dùng cho luận văn
+        'efficiency/train_hours':        round(train_h, 3),
+        'efficiency/fisher_hours':       round(fisher_h, 3),
+        'efficiency/monitor_hours':      round(monitor_h, 3),
+        'efficiency/ckpt_hours':         round(ckpt_h, 3),
+        'efficiency/final_eval_hours':   round(final_eval_h, 3),
+        'efficiency/load_hours':         round(load_h, 3),
     }
-
-    # Log to WandB if active
     try:
         wandb.log(results)
     except Exception:
         pass
 
-    # Print summary
+    # ---- Compact summary (KHÔNG còn cột PAPER TARGET) ----
+    tag = f"{method} · {os.path.basename(config.forget_set_path)} · seed {int(config.random_seed)}"
     print("\n" + "─" * 60)
-    print(" METRIC                    | VALUE   | PAPER TARGET ")
+    print(f" FINAL EVAL — {tag}")
     print("─" * 60)
-    print(f"  MIA_persample (↓)        | {mia:.3f}  | (per-sample SVM)")
-    print(f"  MIA_paper     (↓)        | {mia_paper:.3f}  | 0.571 (3%) / 0.615 (6%) / 0.810 (10%)")
-    print(f"  Forget AUC    (↓)        | {forget_m['AUC']:.3f}  | 0.735 (3%) / 0.654 (6%) / 0.656 (10%)")
-    print(f"  Forget Mac-F1 (↓)        | {forget_m['Macro_F1']:.3f}  | 0.393 (3%) / 0.328 (6%) / 0.313 (10%)")
-    print(f"  Test AUC      (↑)        | {test_m['AUC']:.3f}  | 0.625 (3%) / 0.599 (6%) / 0.565 (10%)")
-    print(f"  Test Mac-F1   (↑)        | {test_m['Macro_F1']:.3f}  | 0.250 (3%) / 0.270 (6%) / 0.252 (10%)")
-    print(f"  1 - CosSim    (↓)        | {1-cossim_re:.3f}")
+    print(f"  Forget    AUC {forget_m['AUC']:.3f}(↓)   F1 {forget_m['Macro_F1']:.3f}   CE {forget_ce:.3f}")
+    print(f"  Test      AUC {test_m['AUC']:.3f}(↑)   F1 {test_m['Macro_F1']:.3f}   CE {test_ce:.3f}")
+    print(f"  MIA       persample {mia:.3f}(↓)   paper {mia_paper:.3f}(↓)")
+    print(f"  1−CosSim(re) {1 - cossim_re:.3f}(↓)")
     print("─" * 60)
-    print(f"  Time (hours)             | {elapsed_h:.3f}  | Forget-MI paper: ~5h")
-    print(f"  GPU peak (GB)            | {gpu_peak:.2f}")
-    print(f"  Trainable params         | {trainable:,} ({100*trainable/total_params:.3f}%)")
+    print(f"  Time      unlearn(core) {core_h:.3f}h  = train {train_h:.3f} + fisher {fisher_h:.3f}")
+    print(f"            overhead: monitor {monitor_h:.3f}  ckpt {ckpt_h:.3f}  "
+          f"load {load_h:.3f}  eval {final_eval_h:.3f}  → wall {wall_h:.3f}h")
+    print(f"  Compute   GPU {gpu_peak:.2f} GB   Trainable {trainable:,} ({100 * trainable / total_params:.2f}%)")
     print("─" * 60)
 
-    # CSV summary (cùng format LoKU để Cell 5 notebook gộp được)
-    # Save CSV at the PARENT of output_dir's parent → e.g. /kaggle/working/results_summary.csv
-    # (not inside baseline_output/). This matches Cell 1's restore path and Cell 6's push path
-    # in run_kaggle_baseline.ipynb, so the multi-seed checkpoint loop sees the same CSV.
-    csv_path = os.path.join(output_dir, "..", "..", "results_summary.csv")
-    csv_path = os.path.normpath(csv_path)
-    # 'id' added 2026-06-18 — same fix as forgetmi_loku.py: notebooks filter by id
-    # to detect completed configs. Without it, sweep/multi-seed re-runs everything.
+    # CSV summary (cùng format LoKU để Cell 5 notebook gộp được). Lưu ở PARENT-của-parent
+    # của output_dir → /kaggle/working/results_summary.csv (khớp restore/push của notebook).
+    csv_path = os.path.normpath(os.path.join(output_dir, "..", "..", "results_summary.csv"))
     row = {**{k.split('/')[-1]: v for k, v in results.items()},
            'id': str(getattr(config, 'id', '')),
            'forget_pct': os.path.basename(config.forget_set_path),
            'seed': int(config.random_seed),
            'method': method,
            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-    new_file = not os.path.exists(csv_path)
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    with open(csv_path, 'a', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if new_file:
-            w.writeheader()
-        w.writerow(row)
-    print(f"\n💾 CSV row saved: {csv_path}")
+    _append_row_csv(csv_path, row)              # tự migrate header + ghi đúng thứ tự cột
+    print(f"💾 CSV: {csv_path}")
 
     # Auto-tracker MD (nếu --exp passed)
     if tracker is not None:
@@ -1032,6 +1070,7 @@ def main():
             print(f"⚠️  Tracker init failed ({e}). Tiếp tục không tracker.")
 
     # ---- Load models ----
+    _load_start = time.time()
     print(f"📦 Loading models...")
     model_og = ImageTextModel.from_pretrained(config.base_model_path).to(device)
     model_unlearn = copy.deepcopy(model_og)
@@ -1088,15 +1127,17 @@ def main():
     dataset['n_test'] = len(dataset['test'])
     dataset['n_rand'] = len(dataset['random'])
     dataset['n_forget'] = len(dataset['forget'])
+    load_h = (time.time() - _load_start) / 3600
 
     # ---- Train ----
-    train_start = time.time()
-    unlearn(
+    timing = unlearn(
         config, output_dir, device, model_og, model_unlearn, model_retrained,
         optimizer, optimizer_grouped_parameters, scheduler, tokenizer,
         dataset, num_labels, alpha, beta, theta, gamma
     )
-    elapsed_h = (time.time() - train_start) / 3600
+    timing['fisher_h'] = 0.0                  # baseline full-FT: không có Fisher/PEFT setup
+    timing['load_h'] = load_h
+    elapsed_h = timing['wall_h']              # headline wall (giữ tương thích CSV cũ)
 
     # Free training-only memory
     del model_og, optimizer
@@ -1104,7 +1145,8 @@ def main():
 
     # ---- Final evaluation ----
     _final_evaluation(config, output_dir, device, model_unlearn, model_retrained,
-                      dataset, elapsed_h, trainable, total_params, tracker=tracker)
+                      dataset, elapsed_h, trainable, total_params, tracker=tracker,
+                      timing=timing)
 
     # ---- Post-eval cleanup ----
     # Per-epoch checkpoints (~450MB × 30 = 13.5GB) would otherwise fill Kaggle's 20GB

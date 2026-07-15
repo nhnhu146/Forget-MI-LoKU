@@ -559,7 +559,6 @@ def run_mia(model, retain_ds, test_ds, forget_ds, device, args, batch_size=32, s
                     and high-variance → report over multiple seeds.
     Both = fraction of forget predicted as 'member' (label 1)."""
     from sklearn.svm import SVC
-    print("  computing per-sample losses (full retain)...")
     rl = per_sample_ce(model, retain_ds, device, args, batch_size)
     tl = per_sample_ce(model, test_ds, device, args, batch_size)
     fl = per_sample_ce(model, forget_ds, device, args, batch_size)
@@ -720,8 +719,10 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
     best_score = -1e9; patience = 0
     margin_ukr = margin_mkr = None
     train_start = time.time()
+    t_train = t_monitor = t_ckpt = 0.0   # bóc tách: train thuần / early-stop monitor / lưu ckpt
 
     for epoch in range(start_epoch, args.unlearn_epochs):
+        _t_ep = time.time()
         model_ul.train()
         for g in gates.values(): g.train()
 
@@ -901,8 +902,10 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
             steps += 1
 
         avg = {k: v / max(steps, 1) for k, v in agg.items()}
+        t_train += time.time() - _t_ep
 
         # ----- Early-stop monitor -----
+        _t_mon = time.time()
         if early_stop_metric == 'cossim':
             # ⚠️ Uses F_re (gold/eval model) DURING training — only legitimate for the
             #    F_re-allowed variant (exp10c). NOT honest for the "no F_re" variant.
@@ -920,12 +923,15 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
         wandb.log(log)
         epoch_line = (f"[E{epoch:02d}] loss={avg['Total']:+.3f}  UKR={avg['UKR']:+.3f}  "
                       f"MKR={avg['MKR']:+.3f}  CLS_ret={avg['CLS_ret']:+.3f}  "
-                      f"DSL_ret={avg['DSL_ret']:+.4f}  DSL_frg={avg['DSL_frg']:+.4f}  "
-                      f"IHL_frg={avg['IHL_frg']:+.4f}  | {mon_str}")
+                      f"DSL_ret={avg['DSL_ret']:+.4f}  IHL_frg={avg['IHL_frg']:+.4f}  | {mon_str}")
         print(epoch_line)
         if tracker is not None:
             tracker.log_epoch_line(epoch_line)
+        t_monitor += time.time() - _t_mon
+
+        _t_ck = time.time()
         save_ckpt(out_dir, epoch, model_ul, gates, optimizer, avg)
+        t_ckpt += time.time() - _t_ck
 
         # Early stopping (higher score = better). 'none' → run all epochs.
         if score is not None:
@@ -937,8 +943,12 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
                     print(f"⏹  Early stop at epoch {epoch} ({early_stop_metric}, best={best_score:.4f})")
                     break
 
-    elapsed_h = (time.time() - train_start) / 3600.0
-    return elapsed_h
+    wall_h = (time.time() - train_start) / 3600.0
+    timing = {'train_h': t_train / 3600, 'monitor_h': t_monitor / 3600,
+              'ckpt_h': t_ckpt / 3600, 'wall_h': wall_h}
+    print(f"⏱  train {timing['train_h']:.3f}h + monitor {timing['monitor_h']:.3f}h "
+          f"+ ckpt {timing['ckpt_h']:.3f}h = wall {wall_h:.3f}h")
+    return timing
 
 
 # ============================================================================
@@ -1057,6 +1067,7 @@ def main():
         torch.cuda.reset_peak_memory_stats()
 
     # ----- Load models -----
+    _load_start = time.time()
     base_p = ensure_model_path(config.base_model_path, "base")
     re_p = ensure_model_path(config.retrained_model_path, "retrained")
     model_og = ImageTextModel.from_pretrained(base_p).to(device)         # fp32 for Fisher
@@ -1070,8 +1081,10 @@ def main():
     # ----- Dataset -----
     print("📚 Building dataset...")
     datasets, num_labels = build_dataset(config, tok)
+    load_h = (time.time() - _load_start) / 3600
 
     # ----- Fisher importance (BEFORE PEFT wrapping) -----
+    _setup_start = time.time()      # LoKU-specific: Fisher + FILA init — đo riêng làm chi phí phương pháp
     target_modules = list(getattr(config, 'lora_target_modules', ['query', 'key', 'value']))
     # [EXP 10] Modality-aware PEFT: also unlearn the IMAGE pathway (MIA reads img_logits only,
     # and the text-only LoRA/FILA of exp08 left Forget-AUC stuck at 0.833). Resolve full names
@@ -1149,7 +1162,9 @@ def main():
             print(f"⚠️  Could not unfreeze classifier heads: {e}")
 
     trainable, total = count_params(model_unlearn)
-    print(f"📊 Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)")
+    fisher_h = (time.time() - _setup_start) / 3600
+    print(f"📊 Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)  "
+          f"| Fisher+init {fisher_h:.3f}h")
 
     # ----- Fusion gates -----
     gates = {
@@ -1175,45 +1190,35 @@ def main():
 
     # ----- Train -----
     print(f"🚀 Unlearning ({config.unlearn_epochs} epochs max)...")
-    elapsed_h = unlearn(config, out_dir, device,
-                       model_og, model_unlearn, model_re,
-                       gates, optimizer, datasets,
-                       weights=(alpha, beta, theta, gamma, eta),
-                       tracker=tracker)
+    timing = unlearn(config, out_dir, device,
+                     model_og, model_unlearn, model_re,
+                     gates, optimizer, datasets,
+                     weights=(alpha, beta, theta, gamma, eta),
+                     tracker=tracker)
+    timing['fisher_h'] = fisher_h
+    timing['load_h'] = load_h
+    elapsed_h = timing['wall_h']
 
     # ============================================================
-    # FINAL EVALUATION
+    # FINAL EVALUATION (dùng CÙNG helper với baseline → so sánh fair)
     # ============================================================
-    print("\n" + "=" * 60)
-    print("📈 FINAL EVALUATION")
-    print("=" * 60)
-
-    # Free training-only memory before eval (model_og + optimizer + gates not needed)
+    _eval_start = time.time()
     del model_og, optimizer, gates
     torch.cuda.empty_cache()
-
-    # Merge LoRA back into base for clean evaluation
-    print("🔀 Merging LoRA adapters into base model...")
-    merged = model_unlearn.merge_and_unload()
+    merged = model_unlearn.merge_and_unload()      # gộp LoRA vào base để eval sạch
     merged.eval()
     for p in merged.parameters():
         p.requires_grad = False
     torch.cuda.empty_cache()
 
-    # Cap retain forwards for CosSim only (the 2× full-retain pass = main eval cost).
-    # MIA uses FULL retain so MIA_paper faithfully matches the original eval. (0 = full.)
+    # CosSim subsample retain (2× full-retain = phần eval nặng nhất); MIA vẫn dùng FULL retain.
     eval_max_retain = int(getattr(config, 'eval_max_retain', 512))
-    if eval_max_retain and eval_max_retain > 0:
-        print(f"⚡ eval_max_retain={eval_max_retain} (subsample retain for CosSim; MIA uses full retain)")
-
-    # Wrap MIA + perf eval in try/except so a single failure doesn't lose everything
     try:
-        print("🛡️  Computing MIA scores (per-sample + paper-style)...")
         mia_res = run_mia(merged, datasets['retain'], datasets['test'], datasets['forget'],
                           device, config, batch_size=config.eval_batch_size,
                           seed=int(config.random_seed),
                           paper_batch_size=int(getattr(config, 'mia_paper_batch_size', 32)))
-        mia = mia_res['persample']          # keep 'mia' = per-sample (existing metric/key)
+        mia = mia_res['persample']
         mia_paper = mia_res['paper']
         forget_ce = mia_res.get('forget_ce', float('nan'))
         test_ce = mia_res.get('test_ce', float('nan'))
@@ -1223,7 +1228,6 @@ def main():
         forget_ce = test_ce = float('nan')
 
     try:
-        print("📐 Computing CosSim vs retrained model...")
         cossim_ds = _subsample_dataset(datasets['retain'], eval_max_retain,
                                        int(config.random_seed))
         cossim_re = cosine_sim_models(merged, model_re, cossim_ds, device,
@@ -1232,7 +1236,6 @@ def main():
         print(f"⚠️  CosSim failed: {e}"); cossim_re = float('nan')
 
     try:
-        print("📊 Performance on test set...")
         test_m = perf_metrics(merged, datasets['test'], device, config,
                               batch_size=config.eval_batch_size)
     except Exception as e:
@@ -1240,7 +1243,6 @@ def main():
         test_m = {'AUC': float('nan'), 'Macro_F1': float('nan'), 'F1': float('nan')}
 
     try:
-        print("📊 Performance on forget set...")
         forget_m = perf_metrics(merged, datasets['forget'], device, config,
                                 batch_size=config.eval_batch_size)
     except Exception as e:
@@ -1249,47 +1251,63 @@ def main():
 
     gpu_peak = (torch.cuda.max_memory_allocated() / 1e9
                 if torch.cuda.is_available() else 0.0)
+    final_eval_h = (time.time() - _eval_start) / 3600
+
+    t = timing
+    train_h   = t.get('train_h', elapsed_h)
+    fisher_h  = t.get('fisher_h', 0.0)
+    monitor_h = t.get('monitor_h', 0.0)
+    ckpt_h    = t.get('ckpt_h', 0.0)
+    load_h    = t.get('load_h', 0.0)
+    wall_h    = t.get('wall_h', elapsed_h)
+    core_h    = train_h + fisher_h             # thời gian unlearning "công bằng" (train + Fisher)
 
     results = {
-        # ---- main metrics (compare to Forget-MI paper Table 1) ----
-        'final/MIA':         round(mia, 3),          # per-sample SVM (LoKU metric)
-        'final/MIA_paper':   round(mia_paper, 3),    # per-batch-mean SVM (eval_unlearning.py style)
-        'final/forget_ce':   round(forget_ce, 3),    # mean img-CE forget (≈ test_ce = lành mạnh)
-        'final/test_ce':     round(test_ce, 3),      # mean img-CE test (mốc tham chiếu)
+        'final/MIA':         round(mia, 3),
+        'final/MIA_paper':   round(mia_paper, 3),
+        'final/forget_ce':   round(forget_ce, 3),
+        'final/test_ce':     round(test_ce, 3),
         'final/Df_AUC':      round(forget_m['AUC'], 3),
         'final/Df_F1':       round(forget_m['Macro_F1'], 3),
         'final/Dt_AUC':      round(test_m['AUC'], 3),
         'final/Dt_F1':       round(test_m['Macro_F1'], 3),
         'final/dist_vs_re':  round(1 - cossim_re, 3),
         'final/cossim_vs_re': round(cossim_re, 4),
-        # ---- efficiency ----
-        'efficiency/unlearn_time_hours': round(elapsed_h, 3),
+        'efficiency/unlearn_time_hours': round(elapsed_h, 3),   # wall (giữ tương thích CSV cũ)
         'efficiency/gpu_peak_GB':        round(gpu_peak, 2),
         'efficiency/trainable_params':   int(trainable),
         'efficiency/total_params':       int(total),
         'efficiency/trainable_ratio':    round(trainable / total, 5),
+        # --- bóc tách thời gian (thêm ở CUỐI dict để CSV schema-migration an toàn) ---
+        'efficiency/unlearn_core_hours': round(core_h, 3),      # ← số THỜI GIAN dùng cho luận văn
+        'efficiency/train_hours':        round(train_h, 3),
+        'efficiency/fisher_hours':       round(fisher_h, 3),
+        'efficiency/monitor_hours':      round(monitor_h, 3),
+        'efficiency/ckpt_hours':         round(ckpt_h, 3),
+        'efficiency/final_eval_hours':   round(final_eval_h, 3),
+        'efficiency/load_hours':         round(load_h, 3),
     }
     wandb.log(results)
 
+    # ---- Compact summary (KHÔNG còn cột PAPER TARGET) ----
+    tag = f"LoKU · {os.path.basename(config.forget_set_path)} · seed {int(config.random_seed)}"
     print("\n" + "─" * 60)
-    print(" METRIC                    | VALUE   | PAPER TARGET ")
+    print(f" FINAL EVAL — {tag}")
     print("─" * 60)
-    print(f"  MIA_persample (↓)        | {mia:.3f}  | (LoKU per-sample SVM — ổn định)")
-    print(f"  MIA_paper     (↓)        | {mia_paper:.3f}  | 0.571 (3%) / 0.615 (6%) / 0.810 (10%)  ← paper-style (thô ~1/7, cần multi-seed)")
-    print(f"  Forget AUC    (↓)        | {forget_m['AUC']:.3f}  | 0.735 (3%) / 0.654 (6%) / 0.656 (10%)")
-    print(f"  Forget Mac-F1 (↓)        | {forget_m['Macro_F1']:.3f}  | 0.393 (3%) / 0.328 (6%) / 0.313 (10%)")
-    print(f"  Test AUC      (↑)        | {test_m['AUC']:.3f}  | 0.625 (3%) / 0.599 (6%) / 0.565 (10%)")
-    print(f"  Test Mac-F1   (↑)        | {test_m['Macro_F1']:.3f}  | 0.250 (3%) / 0.270 (6%) / 0.252 (10%)")
-    print(f"  1 - CosSim    (↓)        | {1-cossim_re:.3f}  |  ~0.4-0.5 (closer to retrained = better)")
+    print(f"  Forget    AUC {forget_m['AUC']:.3f}(↓)   F1 {forget_m['Macro_F1']:.3f}   CE {forget_ce:.3f}")
+    print(f"  Test      AUC {test_m['AUC']:.3f}(↑)   F1 {test_m['Macro_F1']:.3f}   CE {test_ce:.3f}")
+    print(f"  MIA       persample {mia:.3f}(↓)   paper {mia_paper:.3f}(↓)")
+    print(f"  1−CosSim(re) {1 - cossim_re:.3f}(↓)")
     print("─" * 60)
-    print(f"  Time (hours)             | {elapsed_h:.3f}  | Forget-MI paper: ~5h")
-    print(f"  GPU peak (GB)            | {gpu_peak:.2f}   |")
-    print(f"  Trainable params         | {trainable:,} ({100*trainable/total:.3f}%)")
+    print(f"  Time      unlearn(core) {core_h:.3f}h  = train {train_h:.3f} + fisher {fisher_h:.3f}")
+    print(f"            overhead: monitor {monitor_h:.3f}  ckpt {ckpt_h:.3f}  "
+          f"load {load_h:.3f}  eval {final_eval_h:.3f}  → wall {wall_h:.3f}h")
+    print(f"  Compute   GPU {gpu_peak:.2f} GB   Trainable {trainable:,} ({100 * trainable / total:.2f}%)")
     print("─" * 60)
 
     # Save CSV summary (easy to copy into thesis tables)
+    from training.forgetmi_partial import _append_row_csv
     csv_path = os.path.join(out_dir, "results_summary.csv")
-    # 'id', 'epochs', 'kappa_cls_retain' added 2026-06-18.
     row = {**{k.split('/')[-1]: v for k, v in results.items()},
            'id': str(getattr(config, 'id', '')),
            'forget_pct': os.path.basename(config.forget_set_path),
@@ -1300,45 +1318,8 @@ def main():
            'epochs': int(getattr(config, 'unlearn_epochs', 0)),
            'kappa_cls_retain': float(getattr(config, 'kappa_cls_retain', 0.0)),
            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-
-    # SCHEMA MIGRATION: if CSV exists with FEWER cols than current row, rewrite
-    # với full schema để tránh ParserError khi đọc lại (pd.read_csv fails on
-    # row có nhiều cột hơn header). Bug discovered 2026-06-19.
-    if os.path.exists(csv_path):
-        try:
-            with open(csv_path, 'r', newline='') as f:
-                reader = csv.reader(f)
-                existing_header = next(reader, [])
-            new_keys = list(row.keys())
-            missing_in_header = [k for k in new_keys if k not in existing_header]
-            if missing_in_header:
-                print(f"🔧 CSV schema migration: adding {missing_in_header} to header")
-                # Read all old rows, re-write với union schema
-                with open(csv_path, 'r', newline='') as f:
-                    reader = csv.DictReader(f, restkey='_EXTRA', restval='')
-                    old_rows = []
-                    for r in reader:
-                        extra = r.pop('_EXTRA', None)
-                        if extra:  # ghi đè cột thừa từ rows trước fix
-                            for name, val in zip(missing_in_header, extra):
-                                r[name] = val
-                        old_rows.append(r)
-                union_keys = existing_header + missing_in_header
-                with open(csv_path, 'w', newline='') as f:
-                    w = csv.DictWriter(f, fieldnames=union_keys)
-                    w.writeheader()
-                    for r in old_rows:
-                        w.writerow({k: r.get(k, '') for k in union_keys})
-        except Exception as e:
-            print(f"⚠️  Schema migration failed ({e}) — appending may produce malformed CSV")
-
-    new_file = not os.path.exists(csv_path)
-    with open(csv_path, 'a', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if new_file:
-            w.writeheader()
-        w.writerow(row)
-    print(f"\n💾 Saved row to {csv_path}")
+    _append_row_csv(csv_path, row)     # tự migrate header + ghi đúng thứ tự cột (không lệch)
+    print(f"💾 CSV: {csv_path}")
 
     # ----- Auto-fill experiment MD file + INDEX (if --exp was passed) -----
     if tracker is not None:
