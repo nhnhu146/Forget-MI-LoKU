@@ -275,39 +275,52 @@ def data_split_advanced(split_list_path, forget_ids_path, seed=42,
     }
 
 
-# ---- text-feature cache (sao y forgetmi_loku.py: xử lý Kaggle read-only) ----
+# ---- text-feature cache (sao y forgetmi_loku.py: xử lý Kaggle read-only + regen khi mismatch) ----
 
-def _build_text_features(args, tokenizer):
-    processor = (EdemaMultiLabelClassificationProcessor()
-                 if args.output_channel_encoding == 'multilabel'
-                 else EdemaClassificationProcessor())
+def _cache_names(args):
+    cf = f"cachedfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}"
+    cnf = f"cachednoisyfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}"
+    return cf, cnf
+
+
+def _writable_cache_dir():
+    return ('/kaggle/working/text_cache_regen' if os.path.isdir('/kaggle/working')
+            else os.path.join(os.getcwd(), 'text_cache_regen'))
+
+
+def _make_processor(args):
+    return (EdemaMultiLabelClassificationProcessor()
+            if args.output_channel_encoding == 'multilabel'
+            else EdemaClassificationProcessor())
+
+
+def _regen_text_features(args, tokenizer, dst_dir):
+    """Rebuild features từ all_data.tsv vào dst_dir (phải writable). Trả (feats, noisy_feats)."""
+    processor = _make_processor(args)
     get_features = (convert_examples_to_features_multilabel
                     if args.output_channel_encoding == 'multilabel'
                     else convert_examples_to_features)
-    cache_fname = f"cachedfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}"
-    cache_noisy_fname = f"cachednoisyfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}"
+    cache_fname, cache_noisy_fname = _cache_names(args)
+    src_tsv = os.path.join(args.text_data_dir, 'all_data.tsv')
+    if not os.path.exists(src_tsv):
+        raise FileNotFoundError(
+            f"Thiếu {src_tsv} để regenerate cache. Upload all_data.tsv vào 'metadata/'.")
+    os.makedirs(dst_dir, exist_ok=True)
+    synonyms = pd.read_csv(args.synonyms_dir)
+    examples = processor.get_all_examples(args.text_data_dir)
+    noisy_examples = processor.get_noisy_examples(args.text_data_dir, synonyms, args.text_noise_level)
+    feats = get_features(examples, processor.get_labels(), args.max_seq_length, tokenizer)
+    noisy_feats = get_features(noisy_examples, processor.get_labels(), args.max_seq_length, tokenizer)
+    torch.save(feats, os.path.join(dst_dir, cache_fname))
+    torch.save(noisy_feats, os.path.join(dst_dir, cache_noisy_fname))
+    return feats, noisy_feats
+
+
+def _build_text_features(args, tokenizer):
+    processor = _make_processor(args)
+    cache_fname, cache_noisy_fname = _cache_names(args)
     cached = os.path.join(args.text_data_dir, cache_fname)
     cached_noisy = os.path.join(args.text_data_dir, cache_noisy_fname)
-
-    def _writable_cache_dir():
-        return ('/kaggle/working/text_cache_regen' if os.path.isdir('/kaggle/working')
-                else os.path.join(os.getcwd(), 'text_cache_regen'))
-
-    def _regen_to(dst_dir):
-        src_tsv = os.path.join(args.text_data_dir, 'all_data.tsv')
-        if not os.path.exists(src_tsv):
-            raise FileNotFoundError(
-                f"Thiếu {src_tsv} để regenerate cache. Upload all_data.tsv vào 'metadata/'.")
-        os.makedirs(dst_dir, exist_ok=True)
-        synonyms = pd.read_csv(args.synonyms_dir)
-        examples = processor.get_all_examples(args.text_data_dir)
-        noisy_examples = processor.get_noisy_examples(args.text_data_dir, synonyms, args.text_noise_level)
-        feats = get_features(examples, processor.get_labels(), args.max_seq_length, tokenizer)
-        noisy_feats = get_features(noisy_examples, processor.get_labels(), args.max_seq_length, tokenizer)
-        torch.save(feats, os.path.join(dst_dir, cache_fname))
-        torch.save(noisy_feats, os.path.join(dst_dir, cache_noisy_fname))
-        return feats, noisy_feats
-
     if os.path.exists(cached) and os.path.exists(cached_noisy) and not args.reprocess_input_data:
         print("📂 Loading cached features...")
         features = torch.load(cached, weights_only=False)
@@ -315,11 +328,11 @@ def _build_text_features(args, tokenizer):
     else:
         print("🔨 Generating features (lần đầu)...")
         try:
-            features, noisy_features = _regen_to(args.text_data_dir)
+            features, noisy_features = _regen_text_features(args, tokenizer, args.text_data_dir)
         except (PermissionError, OSError, RuntimeError):
             wd = _writable_cache_dir()
             print(f"⚠️  text_data_dir read-only → regenerating to {wd}")
-            features, noisy_features = _regen_to(wd)
+            features, noisy_features = _regen_text_features(args, tokenizer, wd)
     return processor, features, noisy_features
 
 
@@ -344,23 +357,31 @@ def build_dataset(args, tokenizer):
         retain_heldout_splits=int(getattr(args, 'retain_heldout_splits', 10)),
     )
 
-    # cache integrity check (giống loku) trên tập retain
+    # cache integrity check (giống loku) trên tập retain: nếu cache report_ids KHÔNG khớp
+    # split → cache stale → REGENERATE từ all_data.tsv sang writable dir (Kaggle input read-only).
     retain_ids = splits['retain'][0]
     sample_ids = list(retain_ids.values())[:50]
     matches = sum(1 for rid in sample_ids if _resolve(rid, all_txt))
     if sample_ids and matches == 0:
-        wd = ('/kaggle/working/text_cache_regen' if os.path.isdir('/kaggle/working')
-              else os.path.join(os.getcwd(), 'text_cache_regen'))
-        print(f"⚠️  Cache mismatch (0/{len(sample_ids)}) → thử regen từ {wd}")
-        cache_fname = f"cachedfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}"
-        cache_noisy_fname = f"cachednoisyfeatures_train_seqlen-{args.max_seq_length}_{args.output_channel_encoding}"
+        wd = _writable_cache_dir()
+        cache_fname, cache_noisy_fname = _cache_names(args)
         re_cached = os.path.join(wd, cache_fname)
         re_cached_noisy = os.path.join(wd, cache_noisy_fname)
         if os.path.exists(re_cached) and os.path.exists(re_cached_noisy):
+            print(f"⚠️  Cache mismatch (0/{len(sample_ids)}) → dùng lại regen cache tại {wd}")
             features = torch.load(re_cached, weights_only=False)
             noisy_features = torch.load(re_cached_noisy, weights_only=False)
-            all_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in features}
-            noisy_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in noisy_features}
+        else:
+            print(f"⚠️  Cache mismatch (0/{len(sample_ids)}) → regenerate từ all_data.tsv sang {wd} (~5 phút)...")
+            features, noisy_features = _regen_text_features(args, tokenizer, wd)
+        all_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in features}
+        noisy_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in noisy_features}
+        matches = sum(1 for rid in sample_ids if _resolve(rid, all_txt))
+        if matches == 0:
+            raise RuntimeError(
+                f"Sau regenerate vẫn 0/{len(sample_ids)} match. Kiểm tra data_split="
+                f"{args.data_split_path} và {args.text_data_dir}/all_data.tsv.")
+        print(f"   ✅ Sau regen: {matches}/{len(sample_ids)} match.")
 
     def extract(mapping, ids):
         t, m, s, l = {}, {}, {}, {}
