@@ -85,6 +85,14 @@ parameters:
     value: 0.01
   unlearn_epochs:
     value: 30                                                # paper: 30 epochs
+  evaluate_last_and_best:
+    value: true                                              # one run -> last + val-best
+  selection_max_validation:
+    value: 400                                               # same deterministic validation subset as LoKU
+  selection_min_delta:
+    value: 0.0
+  legacy_cossim_monitor:
+    value: false                                             # gold-model CosSim is evaluation, never selection
   scheduler:
     value: "ReduceLROnPlateau"
   warmup_proportion:

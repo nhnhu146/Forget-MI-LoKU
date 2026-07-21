@@ -63,6 +63,12 @@ def set_seed(seed: int):
     torch.backends.cudnn.benchmark = False
 
 
+def _as_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return bool(value)
+
+
 def euclidean_distance(a, b):
     return torch.sqrt(torch.sum((a - b) ** 2, dim=1) + 1e-8)
 
@@ -466,18 +472,32 @@ def apply_loku_soft_init(model, forget_imp, retain_imp, target_modules,
 # Checkpoint
 # ============================================================================
 
-def save_ckpt(out_dir, epoch, model, gates, optimizer, metrics):
+def _trainable_state_dict(model):
+    trainable_names = {name for name, param in model.named_parameters() if param.requires_grad}
+    mutable_names = trainable_names | {name for name, _ in model.named_buffers()}
+    return {
+        key: value.detach().cpu()
+        for key, value in model.state_dict().items()
+        if key in mutable_names
+    }
+
+
+def save_ckpt(out_dir, epoch, model, gates, optimizer, metrics, filename='latest.pt',
+              val_ce=None, include_optimizer=True):
     cp = os.path.join(out_dir, "checkpoints")
     os.makedirs(cp, exist_ok=True)
-    lora_state = {k: v for k, v in model.state_dict().items() if 'lora' in k.lower()}
+    trainable_state = _trainable_state_dict(model)
     payload = {
         'epoch': epoch,
-        'lora_state': lora_state,
+        'trainable_state': trainable_state,
+        'lora_state': {k: v for k, v in trainable_state.items() if 'lora' in k.lower()},
         'gates': {n: g.state_dict() for n, g in gates.items()},
-        'optimizer': optimizer.state_dict(),
         'metrics': metrics,
+        'val_ce': val_ce,
     }
-    torch.save(payload, os.path.join(cp, "latest.pt"))
+    if include_optimizer:
+        payload['optimizer'] = optimizer.state_dict()
+    torch.save(payload, os.path.join(cp, filename))
 
 
 def load_ckpt(out_dir, model, gates, optimizer):
@@ -486,16 +506,30 @@ def load_ckpt(out_dir, model, gates, optimizer):
         return -1
     try:
         cp = torch.load(p, map_location='cpu', weights_only=False)
-        model.load_state_dict(cp['lora_state'], strict=False)
+        state = cp['trainable_state'] if 'trainable_state' in cp else cp['lora_state']
+        model.load_state_dict(state, strict=False)
         for n, g in gates.items():
             if n in cp['gates']:
                 g.load_state_dict(cp['gates'][n])
-        optimizer.load_state_dict(cp['optimizer'])
+        if 'optimizer' in cp:
+            optimizer.load_state_dict(cp['optimizer'])
         print(f"📂 Resumed from epoch {cp['epoch']}")
         return cp['epoch']
     except Exception as e:
         print(f"⚠️  Checkpoint incompatible ({e}); starting fresh.")
         return -1
+
+
+def _append_history_row(csv_path, row):
+    parent = os.path.dirname(csv_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    write_header = not os.path.exists(csv_path)
+    with open(csv_path, 'a', newline='', encoding='utf-8') as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 # ============================================================================
@@ -713,10 +747,24 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
     # [EXP 11] Early-stop monitor. 'val' (HONEST default): validation loss, KHÔNG đụng F_re.
     # 'cossim': độ giống F_re (gold) — chỉ hợp lệ khi cho phép dùng F_re (exp10c). 'none': cố định epoch.
     early_stop_metric = str(getattr(args, 'early_stop_metric', 'val')).lower()
-    val_subset = Subset(datasets['validation'],
-                        list(range(min(400, len(datasets['validation'])))))
+    dual_checkpoint_eval = _as_bool(getattr(args, 'evaluate_last_and_best', False))
+    early_stopping_enabled = _as_bool(getattr(args, 'early_stopping_enabled', True))
+    if dual_checkpoint_eval:
+        early_stop_metric = 'val'
+    selection_max_validation = int(getattr(args, 'selection_max_validation', 400))
+    selection_min_delta = float(getattr(args, 'selection_min_delta', 0.0))
+    val_subset = (Subset(datasets['validation'],
+                         list(range(min(selection_max_validation, len(datasets['validation'])))))
+                  if selection_max_validation > 0 else datasets['validation'])
 
     best_score = -1e9; patience = 0
+    best_epoch = None
+    best_val_ce = float('inf')
+    best_state = None
+    best_gate_state = None
+    best_metrics = None
+    last_epoch = -1
+    last_val_ce = float('nan')
     margin_ukr = margin_mkr = None
     train_start = time.time()
     t_train = t_monitor = t_ckpt = 0.0   # bóc tách: train thuần / early-stop monitor / lưu ckpt
@@ -902,7 +950,8 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
             steps += 1
 
         avg = {k: v / max(steps, 1) for k, v in agg.items()}
-        t_train += time.time() - _t_ep
+        epoch_train_s = time.time() - _t_ep
+        t_train += epoch_train_s
 
         # ----- Early-stop monitor -----
         _t_mon = time.time()
@@ -918,6 +967,8 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
             val_ce = float(per_sample_ce(model_ul, val_subset, device, args,
                                          args.eval_batch_size).mean())
             score = -val_ce; mon_str = f"val_CE={val_ce:.4f}"
+            last_val_ce = val_ce
+        last_epoch = epoch
 
         log = {'epoch': epoch, **{f'loss/{k}': v for k, v in avg.items()}}
         wandb.log(log)
@@ -927,25 +978,97 @@ def unlearn(args, out_dir, device, model_og, model_ul, model_re, gates, optimize
         print(epoch_line)
         if tracker is not None:
             tracker.log_epoch_line(epoch_line)
-        t_monitor += time.time() - _t_mon
+        epoch_monitor_s = time.time() - _t_mon
+        t_monitor += epoch_monitor_s
 
         _t_ck = time.time()
-        save_ckpt(out_dir, epoch, model_ul, gates, optimizer, avg)
+        if not dual_checkpoint_eval:
+            save_ckpt(out_dir, epoch, model_ul, gates, optimizer, avg,
+                      filename='latest.pt', val_ce=last_val_ce, include_optimizer=True)
         t_ckpt += time.time() - _t_ck
 
         # Early stopping (higher score = better). 'none' → run all epochs.
+        is_best_so_far = False
         if score is not None:
-            if score > best_score + 1e-4:
+            if score > best_score + selection_min_delta:
                 best_score = score; patience = 0
+                best_epoch = epoch
+                is_best_so_far = True
+                best_val_ce = -score if early_stop_metric == 'val' else float('nan')
+                if dual_checkpoint_eval:
+                    _t_best = time.time()
+                    best_state = {
+                        key: value.clone() for key, value in _trainable_state_dict(model_ul).items()
+                    }
+                    best_gate_state = {
+                        name: {key: value.detach().cpu().clone()
+                               for key, value in gate.state_dict().items()}
+                        for name, gate in gates.items()
+                    }
+                    best_metrics = dict(avg)
+                    t_ckpt += time.time() - _t_best
             else:
                 patience += 1
-                if patience >= int(getattr(args, 'early_stop_patience', 4)):
+                if (early_stopping_enabled and
+                        patience >= int(getattr(args, 'early_stop_patience', 4))):
                     print(f"⏹  Early stop at epoch {epoch} ({early_stop_metric}, best={best_score:.4f})")
                     break
 
+        history_csv_path = getattr(args, 'history_csv_path', None)
+        if history_csv_path:
+            _append_history_row(history_csv_path, {
+                'id': str(getattr(args, 'id', '')),
+                'method': 'loku',
+                'seed': int(getattr(args, 'random_seed', 0)),
+                'forget_pct': os.path.basename(args.forget_set_path),
+                'epoch': int(epoch + 1),
+                'optimizer_update': 1,
+                'val_ce': last_val_ce,
+                'is_best_so_far': int(is_best_so_far),
+                'best_epoch_so_far': (int(best_epoch + 1) if best_epoch is not None else ''),
+                'total_loss': avg['Total'],
+                'ukr_loss': avg['UKR'],
+                'uu_loss': avg['UU'],
+                'md_loss': avg['MD'],
+                'mkr_loss': avg['MKR'],
+                'cls_retain_loss': avg['CLS_ret'],
+                'cls_forget_loss': avg['CLS_frg'],
+                'distill_retain_loss': avg['DSL_ret'],
+                'distill_forget_loss': avg['DSL_frg'],
+                'ihl_forget_loss': avg['IHL_frg'],
+                'epoch_train_hours': epoch_train_s / 3600,
+                'epoch_monitor_hours': epoch_monitor_s / 3600,
+                'cumulative_train_hours': t_train / 3600,
+                'cumulative_monitor_hours': t_monitor / 3600,
+            })
+
+    if dual_checkpoint_eval and best_epoch is None:
+        raise RuntimeError("No val-best LoKU checkpoint was produced.")
+    if dual_checkpoint_eval:
+        _t_ck = time.time()
+        save_ckpt(out_dir, last_epoch, model_ul, gates, optimizer, avg,
+                  filename='latest.pt', val_ce=last_val_ce, include_optimizer=True)
+        best_path = os.path.join(out_dir, 'checkpoints', 'val_best.pt')
+        torch.save({
+            'epoch': best_epoch,
+            'trainable_state': best_state,
+            'lora_state': {key: value for key, value in best_state.items()
+                           if 'lora' in key.lower()},
+            'gates': best_gate_state,
+            'metrics': best_metrics,
+            'val_ce': best_val_ce,
+        }, best_path)
+        t_ckpt += time.time() - _t_ck
+        del best_state, best_gate_state
     wall_h = (time.time() - train_start) / 3600.0
     timing = {'train_h': t_train / 3600, 'monitor_h': t_monitor / 3600,
-              'ckpt_h': t_ckpt / 3600, 'wall_h': wall_h}
+              'ckpt_h': t_ckpt / 3600, 'wall_h': wall_h,
+              'best_checkpoint': os.path.join(out_dir, 'checkpoints', 'val_best.pt'),
+              'last_checkpoint': os.path.join(out_dir, 'checkpoints', 'latest.pt'),
+              'best_epoch': best_epoch, 'last_epoch': last_epoch,
+              'best_val_ce': best_val_ce, 'last_val_ce': last_val_ce,
+              'training_passes': max(last_epoch + 1, 0),
+              'update_epochs': max(last_epoch + 1, 0)}
     print(f"⏱  train {timing['train_h']:.3f}h + monitor {timing['monitor_h']:.3f}h "
           f"+ ckpt {timing['ckpt_h']:.3f}h = wall {wall_h:.3f}h")
     return timing
@@ -1072,7 +1195,13 @@ def main():
     re_p = ensure_model_path(config.retrained_model_path, "retrained")
     model_og = ImageTextModel.from_pretrained(base_p).to(device)         # fp32 for Fisher
     model_unlearn = ImageTextModel.from_pretrained(base_p).to(device)    # fp32 for LoRA training
-    model_re = ImageTextModel.from_pretrained(re_p).to(device).half()    # fp16 frozen
+    try:
+        model_re = ImageTextModel.from_pretrained(re_p).to(device).half()
+        gold_retrained_available = os.path.abspath(re_p) != os.path.abspath(base_p)
+    except Exception as e:
+        print(f"Warning: retrained model unavailable ({e}); using base model as eval placeholder.")
+        model_re = ImageTextModel.from_pretrained(base_p).to(device).half()
+        gold_retrained_available = False
     tok = BertTokenizer.from_pretrained(
         base_p if os.path.exists(os.path.join(base_p, "vocab.txt"))
         else config.bert_pretrained_dir
@@ -1084,7 +1213,7 @@ def main():
     load_h = (time.time() - _load_start) / 3600
 
     # ----- Fisher importance (BEFORE PEFT wrapping) -----
-    _setup_start = time.time()      # LoKU-specific: Fisher + FILA init — đo riêng làm chi phí phương pháp
+    _fisher_start = time.time()
     target_modules = list(getattr(config, 'lora_target_modules', ['query', 'key', 'value']))
     # [EXP 10] Modality-aware PEFT: also unlearn the IMAGE pathway (MIA reads img_logits only,
     # and the text-only LoRA/FILA of exp08 left Forget-AUC stuck at 0.833). Resolve full names
@@ -1113,6 +1242,8 @@ def main():
         model_og, DataLoader(datasets['retain'], batch_size=fisher_bs),
         device, target_modules, config, max_samples=fisher_n,
     )
+    fisher_h = (time.time() - _fisher_start) / 3600
+    _adapter_init_start = time.time()
 
     # Free fp32 model_og memory; reload as fp16 for training
     del model_og; torch.cuda.empty_cache()
@@ -1162,9 +1293,6 @@ def main():
             print(f"⚠️  Could not unfreeze classifier heads: {e}")
 
     trainable, total = count_params(model_unlearn)
-    fisher_h = (time.time() - _setup_start) / 3600
-    print(f"📊 Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)  "
-          f"| Fisher+init {fisher_h:.3f}h")
 
     # ----- Fusion gates -----
     gates = {
@@ -1187,6 +1315,9 @@ def main():
     theta = float(config.get('theta', 2.0))
     gamma = float(config.get('gamma', 2.0))
     eta = float(getattr(config, 'eta_re_anchor', 0.5))
+    adapter_init_h = (time.time() - _adapter_init_start) / 3600
+    print(f"📊 Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)  "
+          f"| Fisher {fisher_h:.3f}h | adapter init {adapter_init_h:.3f}h")
 
     # ----- Train -----
     print(f"🚀 Unlearning ({config.unlearn_epochs} epochs max)...")
@@ -1196,8 +1327,62 @@ def main():
                      weights=(alpha, beta, theta, gamma, eta),
                      tracker=tracker)
     timing['fisher_h'] = fisher_h
+    timing['adapter_init_h'] = adapter_init_h
     timing['load_h'] = load_h
+    timing['method_gpu_peak_gb'] = (torch.cuda.max_memory_allocated() / 1e9
+                                    if torch.cuda.is_available() else 0.0)
     elapsed_h = timing['wall_h']
+
+    # Fair protocol: evaluate last and validation-best from the same 30-epoch run.
+    if _as_bool(getattr(config, 'evaluate_last_and_best', False)):
+        from training.forgetmi_partial import _final_evaluation
+
+        csv_path = str(getattr(config, 'results_csv_path',
+                               os.path.join(out_dir, 'results_summary.csv')))
+        eval_helpers = (run_mia, cosine_sim_models, perf_metrics, _subsample_dataset)
+        row_extra = {
+            'lora_r': int(config.lora_r),
+            'ihl': float(getattr(config, 'ihl_forget_weight', 0.0)),
+            'img_subtract': float(getattr(config, 'loku_image_subtract_scale', 0.0)),
+            'epochs': int(getattr(config, 'unlearn_epochs', 0)),
+            'kappa_cls_retain': float(getattr(config, 'kappa_cls_retain', 0.0)),
+            'gold_retrained_available': gold_retrained_available,
+        }
+        common_eval = dict(
+            config=config, output_dir=out_dir, device=device,
+            model_retrained=model_re, dataset=datasets, elapsed_h=elapsed_h,
+            trainable=trainable, total_params=total, method='loku', timing=timing,
+            training_passes=timing.get('training_passes'),
+            update_epochs=timing.get('update_epochs'), csv_path=csv_path,
+            row_extra=row_extra, eval_helpers=eval_helpers,
+        )
+
+        del model_og, optimizer, gates
+        torch.cuda.empty_cache()
+        last_model = model_unlearn.merge_and_unload()
+        _final_evaluation(
+            model_unlearn=last_model, tracker=None, checkpoint_kind='last',
+            selected_epoch=(timing['last_epoch'] + 1),
+            selection_value=timing['last_val_ce'], finalize_tracker=False,
+            **common_eval,
+        )
+        del last_model, model_unlearn
+        torch.cuda.empty_cache()
+
+        best_payload = torch.load(timing['best_checkpoint'], map_location='cpu',
+                                  weights_only=False)
+        best_base = ImageTextModel.from_pretrained(base_p).to(device)
+        best_peft = get_peft_model(best_base, peft_cfg)
+        best_peft.load_state_dict(best_payload['trainable_state'], strict=False)
+        best_model = best_peft.merge_and_unload()
+        _final_evaluation(
+            model_unlearn=best_model, tracker=tracker, checkpoint_kind='val_best',
+            selected_epoch=(int(best_payload['epoch']) + 1),
+            selection_value=float(best_payload['val_ce']), finalize_tracker=True,
+            **common_eval,
+        )
+        wandb.finish()
+        return
 
     # ============================================================
     # FINAL EVALUATION (dùng CÙNG helper với baseline → so sánh fair)

@@ -1,9 +1,8 @@
 # ============================================================================
 # CONFIG cho Forget-MI LoKU trên Kaggle
 # ============================================================================
-# Copy của config.yaml, chỉ đổi paths sang Kaggle mount + output_dir Kaggle.
-# Mọi hyperparameter (LoRA, IHL, FILA, distill, lr, epochs...) GIỮ NGUYÊN
-# như config.yaml gốc → kết quả Kaggle so sánh trực tiếp được với Colab.
+# Fair-comparison config: LoKU uses the same fixed 30-pass budget as Forget-MI,
+# selects val-best only with validation CE, and also reports the final checkpoint.
 #
 # Cách chạy (trong notebook Kaggle):
 #   !PYTHONPATH=. WANDB_MODE=disabled python training/forgetmi_loku.py \
@@ -73,7 +72,15 @@ parameters:
   weight_decay:
     value: 0.01
   unlearn_epochs:
-    value: 8
+    value: 30
+  evaluate_last_and_best:
+    value: true
+  selection_max_validation:
+    value: 400
+  selection_min_delta:
+    value: 0.0
+  early_stopping_enabled:
+    value: false                                             # fixed 30-epoch budget; still records val-best
   early_stop_patience:
     value: 4
   early_stop_metric:

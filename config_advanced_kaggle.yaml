@@ -1,0 +1,148 @@
+# ============================================================================
+# CONFIG CHUNG cho nhánh ablation nâng cao (P3, P4, P5, P6, main)
+# ----------------------------------------------------------------------------
+# Cấu trúc: `common` (dùng chung) + `methods.<tên>` (ghi đè theo phương pháp).
+# Mỗi run flatten = common + methods[method]; notebook chọn method bằng cờ.
+#
+# TÊN BIẾN PHẲNG PHÂN BIỆT (tránh 3 chữ α trùng nhau):
+#   lambda_ur / lambda_uu / ...  = trọng số LOSS   (α=UR cũ → lambda_ur)
+#   lora_alpha                   = α của LoRA
+#   schedule_decay_rate          = α_decay của P5
+#
+# Nền cấu hình lấy TỪ 2 PAPER (Forget-MI + LoKU), KHÔNG phải config D cũ:
+#   Forget-MI: use_noise=true(μ0/σ0.1), 30 epoch, bs16, wd0.01, warmup0.1,
+#              UR=1/UU=1/MU=2/MR=2.  LoKU: r=8, α=16(α/r=2), dropout0.05, FILA, IHL.
+#   Điểm mới (IHL/CE/KD=1, margin=quantile0.90, lr=2e-4) = khởi điểm nguyên tắc,
+#   chỉ tinh chỉnh trên validation.
+#
+# Chạy (notebook Kaggle tự override paths + forget_set_path + id):
+#   python training/forgetmi_p3.py --config config_advanced_kaggle.yaml --seed 42 \
+#       --override "forget_set_path=./data_splits/forget_set_3per.csv,id=p3_3per"
+# ============================================================================
+
+common:
+  # ===== Paths (Kaggle — notebook auto-detect & override) =====
+  base_model_path: "/kaggle/input/datasets/nhnhu146/forget-mi-models/base_model/training_original_model"
+  retrained_model_path: "/kaggle/input/datasets/nhnhu146/forget-mi-models/retrained_model/model_retrained_3per"
+  bert_pretrained_dir: "/kaggle/input/datasets/nhnhu146/forget-mi-models/base_model/training_original_model"
+  text_data_dir: "/kaggle/input/datasets/nhnhu146/forget-mi-data/data/metadata"
+  img_data_dir: "/kaggle/input/datasets/nhnhu146/forget-mi-data/data/img_data"
+  data_split_path: "./data_splits/mimic-cxr-sub-img-edema-split-manualtest.csv"
+  synonyms_dir: "./data_splits/Synonyms.csv"
+  forget_set_path: "./data_splits/forget_set_3per.csv"
+  output_dir: "/kaggle/working/advanced_output"
+  results_csv_path: "/kaggle/working/results_advanced.csv"
+  history_csv_path: "/kaggle/working/perepoch_advanced.csv"
+  id: "advanced"
+
+  # ===== Dataset prep =====
+  max_seq_length: 320
+  text_noise_level: 0.5
+  output_channel_encoding: "multiclass"
+  reprocess_input_data: false
+  validation_ratio: 0.1
+  random_point_ratio: 0.1
+  random_seed: 42
+
+  # ===== Holdout (4 tập, seed cố định, chung mọi phương pháp) =====
+  test_sel_splits: 4          # test → 25% D_nm_val/D_utility_val + 75% D_t_final
+  retain_heldout_splits: 10   # D_r → 10% r_heldout (member MIA + val_ce) + 90% retain
+
+  # ===== Training (khung Forget-MI) =====
+  use_noise: true             # tham chiếu og_rnd là bản NHIỄU thật (σ=0.1)
+  noise_mean: 0.0
+  noise_std: 0.1
+  unlearn_epochs: 30
+  unlearn_batch_size: 16
+  eval_batch_size: 16
+  learning_rate: 2.0e-4       # LoRA + FILA nhạy → 2e-4 (sweep {1e-4,2e-4,5e-4} nếu cần)
+  weight_decay: 0.01
+  warmup_proportion: 0.1      # warmup theo global step 10% đầu, sau đó ReduceLROnPlateau/epoch theo S_val
+  grad_clip: 1.0
+  num_cpu_workers: 2
+
+  # ===== Loss weights (nền paper) =====
+  lambda_ur: 1.0
+  lambda_uu: 1.0
+  lambda_mu: 2.0
+  lambda_mr: 2.0
+  lambda_ce: 1.0
+  lambda_kd: 1.0
+  lambda_ihl: 1.0
+  distill_temperature: 2.0
+  unfreeze_classifier_heads: true
+
+  # ===== Margin (đẩy-xa chặn TRẦN, quantile) =====
+  margin_quantile: 0.90
+
+  # ===== LoRA + FILA (LoKU) =====
+  lora_r: 8
+  lora_alpha: 16              # α/r = 2
+  lora_dropout: 0.05
+  lora_target_modules: ["query", "key", "value"]
+  lora_image_last_k_blocks: 1
+  lora_image_include_fc1: false
+  loku_init_scale: 0.05
+  loku_subtract_scale: 1.0
+  loku_image_subtract_scale: 0.5
+  loku_random_init: false
+  fisher_max_samples: 256
+  fisher_batch_size: 16
+
+  # ===== Selector S_val (mỗi G∈[0,1], cố định giữa mọi phương pháp) =====
+  sel_w_forget: 1.0
+  sel_w_privacy: 1.0
+  sel_w_utility: 1.0
+  sel_delta_auc: 0.02
+  sel_delta_f1: 0.02
+
+  # ===== Eval =====
+  eval_max_retain: 512
+  mia_paper_batch_size: 32
+
+  # ===== Model arch flags =====
+  bert_pool_last_hidden: false
+  bert_pool_use_img: false
+  bert_pool_img_lowerlevel: false
+
+methods:
+  # --- P3: hinge đẩy-xa chặn trần + IHL + UR/MR/CE/KD (trọng số cố định) ---
+  p3:
+    id: "p3_3per"
+
+  # --- P4: hai giai đoạn (sweep k qua override), guard 0.05·IHL ở GĐ2 ---
+  p4:
+    id: "p4_3per"
+    p4_stage1_epochs: 15       # k ∈ {5,10,15,20} — sweep bằng --override
+    p4_stage2_guard: 0.05      # 0 = bản thuần (tắt hẳn forget ở GĐ2)
+
+  # --- P5: trọng số động, tổng gần hằng, preset theo FORGET_PCT ---
+  p5:
+    id: "p5_3per"
+    schedule_decay_rate: 3.0
+    # preset ghi đè (nếu muốn): "UR,UU,MU,MR,CE,KD,IHL"
+    # p5_preset_3per: "1.0,1.5,1.0,1.0,1.0,1.0,1.0"
+    # p5_preset_6per: "1.0,1.0,1.5,1.0,1.0,1.0,1.0"
+    # p5_preset_10per: "2.0,1.0,1.0,2.0,1.0,1.5,1.0"
+
+  # --- P6: rank theo Fisher riêng nhánh (α/r=2), gate đóng băng ---
+  p6:
+    id: "p6_3per"
+    gate_mode: "frozen"        # {frozen, reg, free}
+    lambda_gate_reg: 0.1       # chỉ dùng khi gate_mode=reg
+    p6_rank_high: 16
+    p6_rank_mid: 8             # = lora_r → dùng default rank
+    p6_top_pct: 0.30
+    p6_bottom_pct: 0.30
+
+  # --- main = P3 + P5 + P6 (selector S_val; ablation: selector=valce) ---
+  main:
+    id: "main_3per"
+    selector: "sval"           # {sval, valce} — valce chỉ cho ablation selector
+    gate_mode: "frozen"
+    lambda_gate_reg: 0.1
+    schedule_decay_rate: 3.0
+    p6_rank_high: 16
+    p6_rank_mid: 8
+    p6_top_pct: 0.30
+    p6_bottom_pct: 0.30

@@ -12,7 +12,7 @@ import json
 import sklearn
 import time
 import csv
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader, Dataset, Sampler, Subset
 import copy
 import wandb
 import time
@@ -49,6 +49,12 @@ def set_seed(seed: int):
     
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def _as_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return bool(value)
 
 def flatten_metrics(metrics, prefix=""):
     """
@@ -548,12 +554,25 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
     # CHỈ để log — không cần cho unlearning) vs ckpt (I/O lưu checkpoint mỗi epoch).
     t_train = t_monitor = t_ckpt = 0.0
 
+    dual_checkpoint_eval = _as_bool(getattr(args, 'evaluate_last_and_best', False))
+    legacy_cossim_monitor = _as_bool(getattr(args, 'legacy_cossim_monitor', True))
+    selection_max_validation = int(getattr(args, 'selection_max_validation', 400))
+    selection_min_delta = float(getattr(args, 'selection_min_delta', 0.0))
+    val_selection_set = (Subset(val_set, list(range(min(selection_max_validation, len(val_set)))))
+                         if selection_max_validation > 0 else val_set)
+    best_val_ce = float('inf')
+    best_epoch = None
+    best_state = None
+    last_val_ce = float('nan')
+    last_epoch = -1
+
     # Định nghĩa trước vòng lặp: khi unlearn_epochs=0 (eval-only θ_og/θ_re) vòng lặp
     # không chạy nên biến này (bình thường gán lại mỗi epoch) sẽ chưa tồn tại → return crash.
     retain_dataloader = None
 
     for epoch in unlearning_iterator:
         _t_ep = time.time()
+        model_ul.train()
         # ------------------------------------------- UNLEARNING -------------------------------------------
         total_loss = 0
         md_loss, uu_loss = 0, 0
@@ -675,21 +694,43 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
         if epoch != 0:
             optimizer.step()
             optimizer.zero_grad()
-        t_train += time.time() - _t_ep
+        epoch_train_s = time.time() - _t_ep
+        t_train += epoch_train_s
 
         # ----- Per-epoch CosSim eval (FAITHFUL to original Forget-MI implementation) -----
         # Runs FULL retain forward through model_ul AND model_re each epoch. Chỉ để LOG
         # (không dùng cho unlearning/early-stop) → tính vào MONITOR, không phải train.
         _t_mon = time.time()
+        last_epoch = epoch
+        last_val_ce = float('nan')
+        is_best_so_far = False
+        if dual_checkpoint_eval:
+            from training.forgetmi_loku import per_sample_ce
+            was_training = model_ul.training
+            last_val_ce = float(per_sample_ce(
+                model_ul, val_selection_set, device, args, args.eval_batch_size
+            ).mean())
+            if was_training:
+                model_ul.train()
+            # Epoch 0 calibrates margins and does not update model weights.
+            if epoch > 0 and last_val_ce < best_val_ce - selection_min_delta:
+                best_val_ce = last_val_ce
+                best_epoch = epoch
+                is_best_so_far = True
+                model_to_save = model_ul.module if hasattr(model_ul, 'module') else model_ul
+                best_state = {
+                    key: value.detach().cpu().clone()
+                    for key, value in model_to_save.state_dict().items()
+                }
         from evaluation.eval_unlearning import get_probability_measure
         try:
-            cosine_similarity = get_probability_measure(
+            cosine_similarity = (get_probability_measure(
                 args,
                 copy.deepcopy(model_re).eval(),
                 copy.deepcopy(model_ul).eval(),
                 retain_dataloader,
                 device
-            )
+            ) if legacy_cossim_monitor else float('nan'))
         except Exception as e:
             print(f"⚠️  per-epoch CosSim eval failed at epoch {epoch}: {e}")
             cosine_similarity = float('nan')
@@ -704,25 +745,54 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
                 "Total Loss": total_loss / steps,
                 "Learning Rate": args.learning_rate,
                 "Cosine Similarity": cosine_similarity,
+                "selection/val_ce": last_val_ce,
             })
         except Exception:
             pass
 
         elapsed_min = (time.time() - unlearning_start_time) / 60
         eta_min = elapsed_min / (epoch + 1) * (n_epochs - epoch - 1)
+        monitor_text = (f"val_CE={last_val_ce:.4f}" if dual_checkpoint_eval
+                        else f"CosSim={cosine_similarity:+.4f}")
         print(f"[E{epoch:02d}/{n_epochs}] loss={total_loss/steps:+.3f} "
               f"UKR={ukr_loss/steps:+.3f} UU={uu_loss/steps:+.3f} "
               f"MD={md_loss/steps:+.3f} MKR={mkr_loss/steps:+.3f} "
-              f"CosSim={cosine_similarity:+.4f} | {elapsed_min:.1f}m ETA {eta_min:.1f}m")
-        t_monitor += time.time() - _t_mon
+              f"{monitor_text} | {elapsed_min:.1f}m ETA {eta_min:.1f}m")
+        epoch_monitor_s = time.time() - _t_mon
+        t_monitor += epoch_monitor_s
+
+        history_csv_path = getattr(args, 'history_csv_path', None)
+        if history_csv_path:
+            _append_row_csv(history_csv_path, {
+                'id': str(getattr(args, 'id', '')),
+                'method': 'forgetmi',
+                'seed': int(getattr(args, 'random_seed', 0)),
+                'forget_pct': os.path.basename(args.forget_set_path),
+                'epoch': int(epoch + 1),
+                'optimizer_update': int(epoch > 0),
+                'val_ce': last_val_ce,
+                'is_best_so_far': int(is_best_so_far),
+                'best_epoch_so_far': (int(best_epoch + 1) if best_epoch is not None else ''),
+                'total_loss': total_loss / steps,
+                'ukr_loss': ukr_loss / steps,
+                'uu_loss': uu_loss / steps,
+                'md_loss': md_loss / steps,
+                'mkr_loss': mkr_loss / steps,
+                'epoch_train_hours': epoch_train_s / 3600,
+                'epoch_monitor_hours': epoch_monitor_s / 3600,
+                'cumulative_train_hours': t_train / 3600,
+                'cumulative_monitor_hours': t_monitor / 3600,
+            })
 
         # ----- Per-epoch checkpoint save (FAITHFUL to original) -----
         # Original saves every epoch. ~450 MB × 30 = ~13.5 GB on /kaggle/working/. I/O → tính CKPT.
         _t_ck = time.time()
-        epoch_output_dir = os.path.join(output_dir, f"epoch_{epoch}")
+        epoch_output_dir = (output_dir if dual_checkpoint_eval
+                            else os.path.join(output_dir, f"epoch_{epoch}"))
         os.makedirs(epoch_output_dir, exist_ok=True)
         model_to_save = model_ul.module if hasattr(model_ul, 'module') else model_ul
-        torch.save(model_to_save.state_dict(), os.path.join(epoch_output_dir, "model_state_dict.pth"))
+        if not dual_checkpoint_eval:
+            torch.save(model_to_save.state_dict(), os.path.join(epoch_output_dir, "model_state_dict.pth"))
         t_ckpt += time.time() - _t_ck
 
         # ----- Per-epoch eval (READ-ONLY, bật bằng --override eval_every_epoch=1) -----
@@ -739,11 +809,42 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
                   f"fce={_pe.get('forget_ce')} tce={_pe.get('test_ce')}")
             t_monitor += time.time() - _t_mon2
 
+    checkpoint_dir = None
+    best_checkpoint = None
+    last_checkpoint = None
+    if dual_checkpoint_eval:
+        if best_state is None:
+            raise RuntimeError("No eligible val-best checkpoint was produced. Forget-MI needs at least 2 passes.")
+        _t_ck = time.time()
+        checkpoint_dir = os.path.join(output_dir, 'checkpoints')
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        model_to_save = model_ul.module if hasattr(model_ul, 'module') else model_ul
+        last_checkpoint = os.path.join(checkpoint_dir, 'last.pt')
+        best_checkpoint = os.path.join(checkpoint_dir, 'val_best.pt')
+        torch.save({
+            'model_state': model_to_save.state_dict(),
+            'epoch': last_epoch,
+            'val_ce': last_val_ce,
+            'checkpoint_kind': 'last',
+        }, last_checkpoint)
+        torch.save({
+            'model_state': best_state,
+            'epoch': best_epoch,
+            'val_ce': best_val_ce,
+            'checkpoint_kind': 'val_best',
+        }, best_checkpoint)
+        t_ckpt += time.time() - _t_ck
+        del best_state
 
     # ------------------------------------------- Timing breakdown -------------------------------------------
     wall_h = (time.time() - unlearning_start_time) / 3600
     timing = {'train_h': t_train / 3600, 'monitor_h': t_monitor / 3600,
-              'ckpt_h': t_ckpt / 3600, 'wall_h': wall_h}
+              'ckpt_h': t_ckpt / 3600, 'wall_h': wall_h,
+              'best_checkpoint': best_checkpoint, 'last_checkpoint': last_checkpoint,
+              'best_epoch': best_epoch, 'last_epoch': last_epoch,
+              'best_val_ce': best_val_ce, 'last_val_ce': last_val_ce,
+              'training_passes': max(last_epoch + 1, 0),
+              'update_epochs': max(last_epoch, 0)}
     try:
         wandb.log({"time(hours)": wall_h, "time/train_h": timing['train_h'],
                    "time/monitor_h": timing['monitor_h']})
@@ -841,7 +942,10 @@ def _init_wandb(my_config):
 
 def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained,
                       dataset, elapsed_h, trainable, total_params, tracker=None,
-                      method='baseline_partial', timing=None):
+                      method='baseline_partial', timing=None, checkpoint_kind='last',
+                      selected_epoch=None, selection_metric='val_ce', selection_value=None,
+                      training_passes=None, update_epochs=None, csv_path=None,
+                      row_extra=None, eval_helpers=None, finalize_tracker=True):
     """Final eval block — port từ forgetmi_loku.py để có đầy đủ metrics cho luận văn.
 
     Tái sử dụng các helper trong forgetmi_loku (run_mia, cosine_sim_models, perf_metrics)
@@ -849,9 +953,12 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
     gian từ unlearn() (train/monitor/ckpt/fisher/load); None → chỉ hiện elapsed_h.
     """
     _eval_start = time.time()
-    from training.forgetmi_loku import (
-        run_mia, cosine_sim_models, perf_metrics, _subsample_dataset
-    )
+    if eval_helpers is None:
+        from training.forgetmi_loku import (
+            run_mia, cosine_sim_models, perf_metrics, _subsample_dataset
+        )
+    else:
+        run_mia, cosine_sim_models, perf_metrics, _subsample_dataset = eval_helpers
 
     model_unlearn.eval()
     for p in model_unlearn.parameters():
@@ -896,8 +1003,9 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
         print(f"⚠️  Forget perf failed: {e}")
         forget_m = {'AUC': float('nan'), 'Macro_F1': float('nan'), 'F1': float('nan')}
 
-    gpu_peak = (torch.cuda.max_memory_allocated() / 1e9
-                if torch.cuda.is_available() else 0.0)
+    measured_gpu_peak = (torch.cuda.max_memory_allocated() / 1e9
+                         if torch.cuda.is_available() else 0.0)
+    gpu_peak = (timing or {}).get('method_gpu_peak_gb', measured_gpu_peak)
     final_eval_h = (time.time() - _eval_start) / 3600
 
     t = timing or {}
@@ -907,7 +1015,11 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
     ckpt_h    = t.get('ckpt_h', 0.0)
     load_h    = t.get('load_h', 0.0)
     wall_h    = t.get('wall_h', elapsed_h)
-    core_h    = train_h + fisher_h              # thời gian unlearning "công bằng" (train + Fisher)
+    adapter_init_h = t.get('adapter_init_h', 0.0)
+    core_h = train_h + fisher_h + adapter_init_h
+    selection_h = monitor_h + ckpt_h
+    method_total_h = core_h + selection_h
+    total_wall_h = load_h + method_total_h + final_eval_h
 
     results = {
         'final/MIA':         round(mia, 3),
@@ -920,19 +1032,23 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
         'final/Dt_F1':       round(test_m['Macro_F1'], 3),
         'final/dist_vs_re':  round(1 - cossim_re, 3),
         'final/cossim_vs_re': round(cossim_re, 4),
-        'efficiency/unlearn_time_hours': round(elapsed_h, 3),   # wall (giữ tương thích CSV cũ)
+        'efficiency/unlearn_time_hours': round(method_total_h, 3),
         'efficiency/gpu_peak_GB':        round(gpu_peak, 2),
         'efficiency/trainable_params':   int(trainable),
         'efficiency/total_params':       int(total_params),
         'efficiency/trainable_ratio':    round(trainable / total_params, 5),
         # --- bóc tách thời gian (thêm ở CUỐI dict để CSV schema-migration an toàn) ---
-        'efficiency/unlearn_core_hours': round(core_h, 3),      # ← số THỜI GIAN dùng cho luận văn
+        'efficiency/unlearn_core_hours': round(core_h, 3),
+        'efficiency/unlearn_total_hours': round(method_total_h, 3),
         'efficiency/train_hours':        round(train_h, 3),
         'efficiency/fisher_hours':       round(fisher_h, 3),
+        'efficiency/adapter_init_hours': round(adapter_init_h, 3),
+        'efficiency/selection_hours':    round(selection_h, 3),
         'efficiency/monitor_hours':      round(monitor_h, 3),
         'efficiency/ckpt_hours':         round(ckpt_h, 3),
         'efficiency/final_eval_hours':   round(final_eval_h, 3),
         'efficiency/load_hours':         round(load_h, 3),
+        'efficiency/total_wall_hours':   round(total_wall_h, 3),
     }
     try:
         wandb.log(results)
@@ -940,7 +1056,8 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
         pass
 
     # ---- Compact summary (KHÔNG còn cột PAPER TARGET) ----
-    tag = f"{method} · {os.path.basename(config.forget_set_path)} · seed {int(config.random_seed)}"
+    tag = (f"{method} / {checkpoint_kind} / {os.path.basename(config.forget_set_path)} "
+           f"/ seed {int(config.random_seed)}")
     print("\n" + "─" * 60)
     print(f" FINAL EVAL — {tag}")
     print("─" * 60)
@@ -949,7 +1066,8 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
     print(f"  MIA       persample {mia:.3f}(↓)   paper {mia_paper:.3f}(↓)")
     print(f"  1−CosSim(re) {1 - cossim_re:.3f}(↓)")
     print("─" * 60)
-    print(f"  Time      unlearn(core) {core_h:.3f}h  = train {train_h:.3f} + fisher {fisher_h:.3f}")
+    print(f"  Selected  epoch={selected_epoch}  {selection_metric}={selection_value}")
+    print(f"  Time      method(total) {method_total_h:.3f}h = core {core_h:.3f} + selection {selection_h:.3f}")
     print(f"            overhead: monitor {monitor_h:.3f}  ckpt {ckpt_h:.3f}  "
           f"load {load_h:.3f}  eval {final_eval_h:.3f}  → wall {wall_h:.3f}h")
     print(f"  Compute   GPU {gpu_peak:.2f} GB   Trainable {trainable:,} ({100 * trainable / total_params:.2f}%)")
@@ -957,33 +1075,44 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
 
     # CSV summary (cùng format LoKU để Cell 5 notebook gộp được). Lưu ở PARENT-của-parent
     # của output_dir → /kaggle/working/results_summary.csv (khớp restore/push của notebook).
-    csv_path = os.path.normpath(os.path.join(output_dir, "..", "..", "results_summary.csv"))
+    if csv_path is None:
+        csv_path = os.path.normpath(os.path.join(output_dir, "..", "..", "results_summary.csv"))
     row = {**{k.split('/')[-1]: v for k, v in results.items()},
            'id': str(getattr(config, 'id', '')),
            'forget_pct': os.path.basename(config.forget_set_path),
            'seed': int(config.random_seed),
            'method': method,
+           'checkpoint': checkpoint_kind,
+           'selected_epoch': selected_epoch,
+           'selection_metric': selection_metric,
+           'selection_value': selection_value,
+           'training_passes': training_passes,
+           'update_epochs': update_epochs,
+           'gpu_name': (torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'),
+           'torch_version': torch.__version__,
            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    if row_extra:
+        row.update(row_extra)
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     _append_row_csv(csv_path, row)              # tự migrate header + ghi đúng thứ tự cột
     print(f"💾 CSV: {csv_path}")
 
     # Auto-tracker MD (nếu --exp passed)
-    if tracker is not None:
+    if tracker is not None and finalize_tracker:
         tracker_results = {
             'MIA':           float(mia) if mia == mia else float('nan'),
             'MIA_paper':     float(mia_paper) if mia_paper == mia_paper else float('nan'),
             'Df_AUC':        float(forget_m['AUC']),
             'Df_F1':         float(forget_m['Macro_F1']),
             'Dt_AUC':        float(test_m['AUC']),
-            'Dt_F1':         float(forget_m['Macro_F1']),
+            'Dt_F1':         float(test_m['Macro_F1']),
             'dist_vs_re':    float(1 - cossim_re) if cossim_re == cossim_re else float('nan'),
-            'time_h':        float(elapsed_h),
+            'time_h':        float(method_total_h),
             'gpu_gb':        float(gpu_peak),
             'trainable_pct': 100.0 * trainable / total_params,
         }
         try:
-            tracker.finalize(tracker_results, elapsed_h)
+            tracker.finalize(tracker_results, method_total_h)
         except Exception as e:
             print(f"⚠️  Tracker.finalize failed: {e}")
 
@@ -1079,11 +1208,15 @@ def main():
     # crash). Happens when forget% has no gold retrained model on disk (e.g., 6%/10%).
     try:
         model_retrained = ImageTextModel.from_pretrained(config.retrained_model_path).to(device)
+        gold_retrained_available = (
+            os.path.abspath(config.retrained_model_path) != os.path.abspath(config.base_model_path)
+        )
     except Exception as e:
         print(f"⚠️  Cannot load retrained from {config.retrained_model_path}")
         print(f"   Reason: {type(e).__name__}: {str(e)[:200]}")
         print(f"   → Using model_og as DUMMY retrained — CosSim metrics will be INVALID (dist_vs_re ≈ 0)")
         model_retrained = copy.deepcopy(model_og).to(device)
+        gold_retrained_available = False
 
     tokenizer = BertTokenizer.from_pretrained(config.bert_pretrained_dir)
 
@@ -1137,16 +1270,46 @@ def main():
     )
     timing['fisher_h'] = 0.0                  # baseline full-FT: không có Fisher/PEFT setup
     timing['load_h'] = load_h
+    timing['method_gpu_peak_gb'] = (torch.cuda.max_memory_allocated() / 1e9
+                                    if torch.cuda.is_available() else 0.0)
     elapsed_h = timing['wall_h']              # headline wall (giữ tương thích CSV cũ)
 
     # Free training-only memory
     del model_og, optimizer
     torch.cuda.empty_cache()
 
-    # ---- Final evaluation ----
-    _final_evaluation(config, output_dir, device, model_unlearn, model_retrained,
-                      dataset, elapsed_h, trainable, total_params, tracker=tracker,
-                      timing=timing)
+    # ---- Final evaluation: one training run, two checkpoint policies ----
+    dual_checkpoint_eval = _as_bool(getattr(config, 'evaluate_last_and_best', False))
+    common_eval = dict(
+        config=config, output_dir=output_dir, device=device,
+        model_retrained=model_retrained, dataset=dataset, elapsed_h=elapsed_h,
+        trainable=trainable, total_params=total_params, timing=timing,
+        training_passes=timing.get('training_passes'),
+        update_epochs=timing.get('update_epochs'),
+        row_extra={'gold_retrained_available': gold_retrained_available},
+        csv_path=getattr(config, 'results_csv_path', None),
+    )
+    _final_evaluation(
+        model_unlearn=model_unlearn, tracker=None if dual_checkpoint_eval else tracker,
+        checkpoint_kind='last', selected_epoch=(timing.get('last_epoch', -1) + 1),
+        selection_value=timing.get('last_val_ce'), finalize_tracker=not dual_checkpoint_eval,
+        **common_eval,
+    )
+
+    if dual_checkpoint_eval:
+        best_payload = torch.load(timing['best_checkpoint'], map_location='cpu',
+                                  weights_only=False)
+        model_unlearn.load_state_dict(best_payload['model_state'])
+        best_epoch = int(best_payload['epoch'])
+        best_val_ce = float(best_payload['val_ce'])
+        del best_payload
+        torch.cuda.empty_cache()
+        _final_evaluation(
+            model_unlearn=model_unlearn, tracker=tracker,
+            checkpoint_kind='val_best', selected_epoch=(best_epoch + 1),
+            selection_value=best_val_ce, finalize_tracker=True,
+            **common_eval,
+        )
 
     # ---- Post-eval cleanup ----
     # Per-epoch checkpoints (~450MB × 30 = 13.5GB) would otherwise fill Kaggle's 20GB
