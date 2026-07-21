@@ -345,7 +345,15 @@ def build_dataset(args, tokenizer):
     noisy_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id) for f in noisy_features}
 
     def _resolve(r, txt_map):
-        for cand in (r, f"s{r}", str(r).replace('s', '')):
+        # dung sai prefix 's' + int/str: cache report_id có thể là int trong khi split là str.
+        s = str(r).replace('s', '')
+        cands = [r, str(r), f"s{r}", s]
+        if s.isdigit():
+            try:
+                cands.append(int(s))
+            except ValueError:
+                pass
+        for cand in cands:
             if cand in txt_map:
                 return cand
         return None
@@ -425,6 +433,14 @@ def build_dataset(args, tokenizer):
             output_channel_encoding=args.output_channel_encoding,
         )
         print(f"  [{name}] {len(datasets[name])} samples")
+    # Fail-fast rõ ràng nếu tập cốt lõi rỗng (thay vì lỗi 'need at least one array' sâu ở eval).
+    empty = [n for n in ('retain', 'forget', 'sel', 'test_final') if len(datasets[n]) == 0]
+    if empty:
+        raise RuntimeError(
+            f"Dataset rỗng {empty} (0 sample) — text/cache KHÔNG khớp split. "
+            f"Kiểm tra: (1) {args.text_data_dir}/all_data.tsv có tồn tại để regen? "
+            f"(2) cache report_id có khớp study_id trong {args.data_split_path}? "
+            f"Cache regen tại {_writable_cache_dir()}.")
     return datasets, num_labels
 
 
