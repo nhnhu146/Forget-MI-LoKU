@@ -593,8 +593,9 @@ def compute_epoch0_margins(model_ul, model_og, gates, forget_dl, rand_dl, args, 
             break
         f_in, _, _ = get_model_inputs(args, fb, device)
         rnd_in, _, _ = get_model_inputs(args, rb, device)
+        # model_ul FP32 (không autocast) — ĐỒNG NHẤT với forward lúc train/selector.
+        ul_i, _, ul_t, _ = model_ul(**f_in)[:4]
         with torch.autocast(device_type='cuda', enabled=torch.cuda.is_available()):
-            ul_i, _, ul_t, _ = safe_forward(model_ul, f_in)[:4]
             og_i, _, og_t, _ = safe_forward(model_og, rnd_in)[:4]
         ul_i = ul_i.float(); ul_t = ul_t.float(); og_i = og_i.float(); og_t = og_t.float()
         ul_c = torch.cat((ul_i, ul_t), dim=-1)
@@ -607,8 +608,15 @@ def compute_epoch0_margins(model_ul, model_og, gates, forget_dl, rand_dl, args, 
     dm = np.concatenate(dm_all) if dm_all else np.array([1.0])
     m_u = float(np.quantile(du, quantile))
     m_m = float(np.quantile(dm, quantile))
-    print(f"📏 Margin quantile {quantile:.2f}: m_u={m_u:.4f} (d_u∈[{du.min():.3f},{du.max():.3f}]) "
-          f"m_m={m_m:.4f} (d_m∈[{dm.min():.3f},{dm.max():.3f}])")
+    # active-rate tại margin-time (theo định nghĩa Q_q ⇒ ~q) — kiểm tra quantile không hỏng.
+    act_u = float((du < m_u).mean()); act_m = float((dm < m_m).mean())
+    print(f"📏 Margin quantile {quantile:.2f}: m_u={m_u:.4f} (d_u∈[{du.min():.3f},{du.max():.3f}] "
+          f"active={act_u:.2f})  m_m={m_m:.4f} (d_m∈[{dm.min():.3f},{dm.max():.3f}] active={act_m:.2f})")
+    lo, hi = quantile - 0.15, min(0.99, quantile + 0.08)
+    if not (lo <= act_u <= hi and lo <= act_m <= hi):
+        raise RuntimeError(
+            f"Margin/loss KHÔNG đồng nhất: active_uu={act_u:.2f} active_mu={act_m:.2f} "
+            f"(kỳ vọng ~{quantile:.2f}). d_u/d_m gần như hằng số hoặc lỗi tính margin.")
     return m_u, m_m
 
 
@@ -772,15 +780,17 @@ def eval_forget_losses(model_ul, model_og, gates, forget_dl, rand_dl, margins, a
     for fb, rb in zip(forget_dl, rand_dl):
         f_in, f_lbl, _ = get_model_inputs(args, fb, device)
         rnd_in, _, _ = get_model_inputs(args, rb, device)
+        # model_ul forward ở FP32 (KHÔNG autocast) — khớp forward lúc TRAIN. IHL đẩy logit
+        # text trên forget rất lớn; dưới fp16 autocast logit >65504 → inf → softmax → NAN
+        # (làm G_forget/S_val = nan từ ~E11, selector mù các epoch sau). fp32 → softmax ổn định.
+        ul_i, ul_il, ul_t, ul_tl = model_ul(**f_in)[:4]
         with _eval_autocast():
-            ul_i, ul_il, ul_t, ul_tl = safe_forward(model_ul, f_in)[:4]
             og_i, _, og_t, _ = safe_forward(model_og, rnd_in)[:4]
         ul_i = ul_i.float(); ul_t = ul_t.float(); og_i = og_i.float(); og_t = og_t.float()
         ul_il = ul_il.float(); ul_tl = ul_tl.float()
-        # UU_b / MU_b
-        d_u = euclidean_distance(torch.cat((ul_i, ul_t), -1), torch.cat((og_i, og_t), -1)).mean()
-        d_m = euclidean_distance(gates['ul_frg'](ul_i, ul_t), gates['og_rnd'](og_i, og_t)).mean()
-        uu_b = F.relu(m_u - d_u); mu_b = F.relu(m_m - d_m)
+        # UU_b / MU_b PER-SAMPLE (đồng nhất forget_hinge lúc train)
+        ul_j = gates['ul_frg'](ul_i, ul_t); og_j = gates['og_rnd'](og_i, og_t)
+        uu_b, mu_b, _ = forget_hinge(ul_i, ul_t, ul_j, og_i, og_t, og_j, (m_u, m_m))
         # IHL = 1 + p(true) − max_{v≠true} p(v)  (bounded [0,2])
         f_y = f_lbl.long().view(-1)
         ihl = inverted_hinge_loss(ul_il, ul_tl, f_y)
@@ -796,14 +806,22 @@ def compute_S_val(forget_losses, mia_val, ul_perf, og_perf, margins, weights, de
     margins=(m_u,m_m); weights=(w_f,w_p,w_u); deltas=(δ_A,δ_F)."""
     m_u, m_m = margins; w_f, w_p, w_u = weights; d_A, d_F = deltas
     eps = 1e-6
+
+    def _safe01(x):
+        """clip [0,1]; nan/inf → 1.0 (tệ nhất) để S_val luôn hữu hạn, selector không bị mù."""
+        x = float(x)
+        if not np.isfinite(x):
+            return 1.0
+        return float(np.clip(x, 0.0, 1.0))
+
     g_forget = (1.0 / 3.0) * (forget_losses['ihl'] / 2.0
                               + forget_losses['uu_b'] / (m_u + eps)
                               + forget_losses['mu_b'] / (m_m + eps))
-    g_forget = float(np.clip(g_forget, 0.0, 1.0))
-    g_privacy = float(np.clip(mia_val, 0.0, 1.0))
+    g_forget = _safe01(g_forget)
+    g_privacy = _safe01(mia_val)
     g_A = max(0.0, og_perf['AUC'] - ul_perf['AUC'] - d_A) / max(1e-6, 1.0 - d_A)
     g_F = max(0.0, og_perf['Macro_F1'] - ul_perf['Macro_F1'] - d_F) / max(1e-6, 1.0 - d_F)
-    g_utility = 0.5 * (float(np.clip(g_A, 0, 1)) + float(np.clip(g_F, 0, 1)))
+    g_utility = 0.5 * (_safe01(g_A) + _safe01(g_F))
     s = w_f * g_forget + w_p * g_privacy + w_u * g_utility
     return {'S_val': float(s), 'G_forget': g_forget, 'G_privacy': g_privacy,
             'G_utility': g_utility}
@@ -824,6 +842,25 @@ def inverted_hinge_loss(img_logits, txt_logits, y):
         p_other = probs.masked_fill(mask, -1.0).max(dim=-1)[0]
         return (1.0 + p_true - p_other).mean()
     return 0.5 * (_one(img_logits) + _one(txt_logits))
+
+
+def forget_hinge(ul_i, ul_t, ul_j, og_i, og_t, og_j, margins):
+    """Hinge FORGET đẩy-xa chặn TRẦN, tính PER-SAMPLE (ĐỒNG NHẤT với margin quantile
+    per-sample — KHÔNG lấy mean batch trước rồi mới hinge):
+        L_UU_b = mean_i ReLU(m_u − d_u,i) ,  L_MU_b = mean_i ReLU(m_m − d_m,i)
+    Vì m = Q_0.90 của {d_i^(0)} → ~90% mẫu có d_i<m lúc bắt đầu ⇒ UU/MU kích hoạt.
+    (Bản cũ hinge trên mean → gần như luôn 0 do mean nằm ở ~phân vị 50 và tụt qua m ngay.)
+    Trả (L_uu, L_mu, stats={d_u_mean,d_m_mean,uu_active,mu_active})."""
+    m_u, m_m = margins
+    d_u = euclidean_distance(torch.cat((ul_i, ul_t), -1), torch.cat((og_i, og_t), -1))  # [N]
+    d_m = euclidean_distance(ul_j, og_j)                                                 # [N]
+    L_uu = F.relu(m_u - d_u).mean()
+    L_mu = F.relu(m_m - d_m).mean()
+    with torch.no_grad():
+        stats = {'d_u_mean': float(d_u.mean()), 'd_m_mean': float(d_m.mean()),
+                 'uu_active': float((d_u < m_u).float().mean()),
+                 'mu_active': float((d_m < m_m).float().mean())}
+    return L_uu, L_mu, stats
 
 
 def _gate_reg_loss(ctx, cfg):
@@ -903,11 +940,11 @@ def combined_batch_loss(cfg, ctx, fb, rb, retb, device, retain_margins, weights,
         L_ihl = inverted_hinge_loss(ul_frg_il, ul_frg_tl, f_y)
         comp['IHL'] = L_ihl.item()
         if forget_active:
-            d_u = euclidean_distance(torch.cat((ul_frg_i, ul_frg_t), -1),
-                                     torch.cat((og_rnd_i, og_rnd_t), -1)).mean()
-            d_m = euclidean_distance(ul_frg_j, og_rnd_j).mean()
-            L_uu = F.relu(m_u - d_u); L_mu = F.relu(m_m - d_m)
+            L_uu, L_mu, hstats = forget_hinge(ul_frg_i, ul_frg_t, ul_frg_j,
+                                              og_rnd_i, og_rnd_t, og_rnd_j, (m_u, m_m))
             comp['UU'] = L_uu.item(); comp['MU'] = L_mu.item()
+            comp['uu_active'] = hstats['uu_active']; comp['mu_active'] = hstats['mu_active']
+            comp['d_u_mean'] = hstats['d_u_mean']; comp['d_m_mean'] = hstats['d_m_mean']
             loss = loss + lam_uu * L_uu + lam_mu * L_mu + lam_ihl * L_ihl
         else:
             loss = loss + guard_ihl * L_ihl        # P4-GĐ2: guard nhỏ
@@ -1457,16 +1494,20 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
         sched.epoch_step(S['S_val'])
         t_sel += _time.time() - _t
 
+        m_u, m_m = ctx['margins']
         print(f"[{method} E{epoch:02d}] loss={avg.get('Total', 0):+.3f} "
-              f"UU={avg.get('UU', 0):.3f} MU={avg.get('MU', 0):.3f} CE={avg.get('CE', 0):.3f} "
-              f"KD={avg.get('KD', 0):.4f} IHL={avg.get('IHL', 0):.3f} | S_val={S['S_val']:.4f} "
-              f"(Gf={S['G_forget']:.3f} Gp={S['G_privacy']:.3f} Gu={S['G_utility']:.3f}) "
-              f"val_ce={S['val_ce']:.3f}")
+              f"UU={avg.get('UU', 0):.4f} MU={avg.get('MU', 0):.4f} "
+              f"(act {avg.get('uu_active', 0):.2f}/{avg.get('mu_active', 0):.2f}, "
+              f"d̄ {avg.get('d_u_mean', 0):.3f}/{avg.get('d_m_mean', 0):.2f}) "
+              f"CE={avg.get('CE', 0):.3f} KD={avg.get('KD', 0):.4f} IHL={avg.get('IHL', 0):.3f} "
+              f"| S_val={S['S_val']:.4f} (Gf={S['G_forget']:.3f} Gp={S['G_privacy']:.3f} "
+              f"Gu={S['G_utility']:.3f}) val_ce={S['val_ce']:.3f}")
 
         save_ckpt(ctx['out_dir'], epoch, model_ul, gates, optimizer, avg,
                   filename='latest.pt', val_ce=S['val_ce'], s_val=S['S_val'])
         sel_value = S[select_by]
-        if sel_value < best['sel_value']:
+        # isfinite guard: checkpoint có S_val/val_ce = nan/inf KHÔNG BAO GIỜ được chọn.
+        if np.isfinite(sel_value) and sel_value < best['sel_value']:
             best.update({'sel_value': sel_value, 's_val': S['S_val'], 'epoch': epoch,
                          'state': {k: v.clone() for k, v in trainable_state_dict(model_ul).items()},
                          'gates': {n: {k: v.detach().cpu().clone() for k, v in g.state_dict().items()}
@@ -1479,6 +1520,9 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
                 'G_privacy': S['G_privacy'], 'G_utility': S['G_utility'], 'val_ce': S['val_ce'],
                 'mia_val': S['mia_val'], 'total_loss': avg.get('Total', 0),
                 'ihl': avg.get('IHL', 0), 'uu': avg.get('UU', 0), 'mu': avg.get('MU', 0),
+                'uu_active': avg.get('uu_active', 0), 'mu_active': avg.get('mu_active', 0),
+                'd_u_mean': avg.get('d_u_mean', 0), 'd_m_mean': avg.get('d_m_mean', 0),
+                'margin_u': m_u, 'margin_m': m_m,
                 'ur': avg.get('UR', 0), 'mr': avg.get('MR', 0), 'ce': avg.get('CE', 0),
                 'kd': avg.get('KD', 0), 'cum_optimizer_steps': total_steps,
             })
