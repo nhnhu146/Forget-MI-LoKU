@@ -584,8 +584,10 @@ def compute_epoch0_margins(model_ul, model_og, gates, forget_dl, rand_dl, args, 
     d_u = ||[F_ul_img,F_ul_txt](D_f) − [F_og_img,F_og_txt](noisy)||  (đơn phương thức concat)
     d_m = ||gate_ul(D_f) − gate_og(noisy)||                          (kết hợp)
     Vì Euclid phụ thuộc số chiều/thang đo embedding → quantile ổn định hơn hằng số."""
-    model_ul.eval(); model_og.eval()
-    for g in gates.values(): g.eval()
+    # KHỚP HỆT regime của loss lúc train: model_ul.train() (dropout BẬT) nhưng BN giữ eval.
+    # (Trước đây eval() làm BN+dropout khác train → margin lệch loss → UU/MU=0.) og luôn eval.
+    model_ul.train(); set_bn_eval(model_ul); model_og.eval()
+    for g in gates.values(): g.train()
     du_all, dm_all = [], []
     it = zip(forget_dl, rand_dl)
     for bi, (fb, rb) in enumerate(it):
@@ -1303,6 +1305,21 @@ def make_optimizer(model, gates, cfg):
     return AdamW(params, lr=float(cfg.learning_rate), weight_decay=float(cfg.weight_decay))
 
 
+def set_bn_eval(model):
+    """Giữ MỌI BatchNorm ở EVAL (running-stats, KHÔNG cập nhật) ngay cả khi model.train().
+    Vì sao BẮT BUỘC: base bị đóng băng (chỉ LoRA/head train). Nếu để BN train-mode, ảnh
+    encoder dùng batch-stat của forget set NHỎ (16 mẫu) → embedding nhảy loạn (d_u eval≈0.02
+    nhưng train≈3.6) → (1) margin tính ở eval KHÔNG khớp loss ở train ⇒ UU/MU=0;
+    (2) ul (train-BN) lệch og (eval-BN) trên cùng input. Đóng băng BN sửa cả hai + đúng chuẩn
+    fine-tune trên base đóng băng."""
+    import torch.nn as nn
+    n = 0
+    for m in model.modules():
+        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            m.eval(); n += 1
+    return n
+
+
 def setup_experiment(cfg, device, rank_alloc_fn=None, gate_mode='free'):
     """Dựng TOÀN BỘ context dùng chung cho P3/P4/P5/P6/main:
     models → dataset (4-tập) → Fisher → (rank_alloc_fn) → PEFT+FILA → mở băng head →
@@ -1465,6 +1482,9 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
     for epoch in range(int(cfg.unlearn_epochs)):
         _t = _time.time()
         model_ul.train()
+        _nbn = set_bn_eval(model_ul)     # BN giữ eval (running-stats) → khớp margin, đúng chuẩn LoRA
+        if epoch == 0:
+            print(f"   🧊 giữ {_nbn} BatchNorm ở eval-mode trong lúc train (base đóng băng)")
         for g in gates.values():
             g.train()
         retain_dl = DataLoader(datasets['retain'], sampler=torch.utils.data.RandomSampler(datasets['retain']),
