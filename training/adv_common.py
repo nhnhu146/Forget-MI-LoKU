@@ -944,10 +944,17 @@ def combined_batch_loss(cfg, ctx, fb, rb, retb, device, retain_margins, weights,
         if forget_active:
             L_uu, L_mu, hstats = forget_hinge(ul_frg_i, ul_frg_t, ul_frg_j,
                                               og_rnd_i, og_rnd_t, og_rnd_j, (m_u, m_m))
-            comp['UU'] = L_uu.item(); comp['MU'] = L_mu.item()
             comp['uu_active'] = hstats['uu_active']; comp['mu_active'] = hstats['mu_active']
             comp['d_u_mean'] = hstats['d_u_mean']; comp['d_m_mean'] = hstats['d_m_mean']
-            loss = loss + lam_uu * L_uu + lam_mu * L_mu + lam_ihl * L_ihl
+            # ABLATION 'A': ablate_uu_mu=true → KHÔNG cộng UU/MU vào loss (vẫn log để đối chiếu).
+            # Chặn ở TẦNG LOSS vì P5/main lấy trọng số từ preset, KHÔNG đọc lambda_uu/lambda_mu
+            # → override lambda_uu=0 vô tác dụng với main (bug đã gặp: noUUMU trùng hệt main).
+            if as_bool(getattr(cfg, 'ablate_uu_mu', False)):
+                comp['UU'] = 0.0; comp['MU'] = 0.0
+                loss = loss + lam_ihl * L_ihl
+            else:
+                comp['UU'] = L_uu.item(); comp['MU'] = L_mu.item()
+                loss = loss + lam_uu * L_uu + lam_mu * L_mu + lam_ihl * L_ihl
         else:
             loss = loss + guard_ihl * L_ihl        # P4-GĐ2: guard nhỏ
 

@@ -41,11 +41,23 @@ def load_eval_model(model_path, model_type, base_p, device):
         model = ImageTextModel.from_pretrained(path).to(device)
     else:  # state_dict (.pth)
         model = ImageTextModel.from_pretrained(base_p).to(device)
-        sd = torch.load(model_path, map_location='cpu')
-        if isinstance(sd, dict) and 'state_dict' in sd:
-            sd = sd['state_dict']
+        sd = torch.load(model_path, map_location='cpu', weights_only=False)
+        # bóc wrapper: baseline dual-checkpoint lưu {'model_state':...}, bản per-epoch lưu raw
+        if isinstance(sd, dict):
+            for k in ('model_state', 'state_dict', 'trainable_state'):
+                if k in sd and isinstance(sd[k], dict):
+                    print(f"   (bóc checkpoint key '{k}', epoch={sd.get('epoch', '?')})")
+                    sd = sd[k]
+                    break
         missing, unexpected = model.load_state_dict(sd, strict=False)
-        print(f"   load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
+        n_total = len(model.state_dict())
+        print(f"   load_state_dict: nạp {n_total - len(missing)}/{n_total} khóa "
+              f"(missing={len(missing)}, unexpected={len(unexpected)})")
+        # CHẶN nạp hỏng: nếu thiếu quá nửa → model gần như còn nguyên BASE ⇒ số báo cáo sẽ SAI
+        if len(missing) > 0.5 * n_total:
+            raise RuntimeError(
+                f"Nạp state_dict HỎNG: thiếu {len(missing)}/{n_total} khóa → model gần như là "
+                f"BASE (chưa unlearn), số sẽ sai. Kiểm tra định dạng {model_path}.")
     model.eval()
     for p in model.parameters():
         p.requires_grad = False
