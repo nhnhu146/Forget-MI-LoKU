@@ -39,6 +39,10 @@ import sys
 import time
 import argparse
 
+# Chống phân mảnh VRAM (train FULL 113M fp32 trên ảnh 2048² rất sát trần T4 14.5GB).
+# PHẢI đặt TRƯỚC khi import torch (trước lần cấp phát CUDA đầu tiên).
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
@@ -221,6 +225,10 @@ def main():
     for p in ctx['model_og'].parameters():
         p.requires_grad = False
     ctx['model_og'].eval()
+    # TIẾT KIỆM VRAM: model_re chỉ dùng ở eval cuối (CosSim) → đẩy sang CPU lúc train,
+    # đưa lại GPU trước final_evaluation. (Train full-model fp32 đã rất sát trần T4.)
+    ctx['model_re'] = ctx['model_re'].cpu()
+    torch.cuda.empty_cache()
     # paper: tinh chỉnh TOÀN BỘ F_ul (không LoRA)
     for p in ctx['model_unlearn'].parameters():
         p.requires_grad = True
@@ -251,6 +259,8 @@ def main():
 
     csv_path = str(getattr(cfg, 'results_csv_path', os.path.join(out_dir, 'results_advanced.csv')))
     ctx['model_unlearn'].eval()
+    torch.cuda.empty_cache()
+    ctx['model_re'] = ctx['model_re'].to(device)      # đưa lại GPU cho CosSim
     C.final_evaluation(ctx['model_unlearn'], ctx['model_re'], datasets, cfg, device,
                        METHOD, run_id, checkpoint_kind='last',
                        selected_epoch=timing['last_epoch'] + 1, timing=timing,
