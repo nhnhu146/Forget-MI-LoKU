@@ -1463,6 +1463,34 @@ def selection_metrics(model_ul, model_og, gates, datasets, forget_dl, rand_dl,
     return S
 
 
+@torch.no_grad()
+def eval_on_test_final(model_ul, model_re, datasets, cfg, device):
+    """Eval model SỐNG (LoRA active, eval-mode) trên D_t_final + D_f + MIA + 1−Sim(gold).
+    Dùng để 'CHỌN EPOCH TỐT NHẤT' như cách tái lập Forget-MI (mỗi epoch ghi 1 dòng, rồi dò
+    epoch gần GOLD nhất). MIA: member=retain(subsample), non-member=D_t_final, đoán D_f."""
+    bs = int(cfg.eval_batch_size)
+    emr = int(cfg.get('eval_max_retain', 512))
+    member = subsample_dataset(datasets['retain'], emr, int(cfg.random_seed))
+    try:
+        mia = run_mia(model_ul, member, datasets['test_final'], datasets['forget'], device, cfg,
+                      batch_size=bs, seed=int(cfg.random_seed),
+                      paper_batch_size=int(cfg.get('mia_paper_batch_size', 32)))
+    except Exception:
+        mia = {'persample': float('nan'), 'paper': float('nan'),
+               'forget_ce': float('nan'), 'nonmember_ce': float('nan')}
+    tm = perf_metrics(model_ul, datasets['test_final'], device, cfg, batch_size=bs)
+    fm = perf_metrics(model_ul, datasets['forget'], device, cfg, batch_size=bs)
+    try:
+        cs = cosine_sim_models(model_ul, model_re, member, device, cfg, batch_size=bs)
+    except Exception:
+        cs = float('nan')
+    return {'Df_AUC': fm['AUC'], 'Df_F1': fm['Macro_F1'], 'Df_PairAUC': fm.get('Pairwise_AUC'),
+            'Dt_AUC': tm['AUC'], 'Dt_F1': tm['Macro_F1'], 'Dt_PairAUC': tm.get('Pairwise_AUC'),
+            'MIA': mia['persample'], 'MIA_paper': mia['paper'],
+            'forget_ce': mia['forget_ce'], 'test_ce': mia['nonmember_ce'],
+            'dist_vs_re': (1 - cs) if np.isfinite(cs) else float('nan')}
+
+
 def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
     """Vòng train dùng chung (P3/P4/P5/P6/main). weight_fn(cfg, ctx, epoch, global_frac)
     → (weights, forget_active, guard_ihl) quyết định trọng số/giai đoạn TỪNG BATCH.
@@ -1529,6 +1557,21 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
               f"CE={avg.get('CE', 0):.3f} KD={avg.get('KD', 0):.4f} IHL={avg.get('IHL', 0):.3f} "
               f"| S_val={S['S_val']:.4f} (Gf={S['G_forget']:.3f} Gp={S['G_privacy']:.3f} "
               f"Gu={S['G_utility']:.3f}) val_ce={S['val_ce']:.3f}")
+
+        # ---- 'CHỌN EPOCH TỐT NHẤT': eval mỗi epoch trên D_t_final (như tái lập Forget-MI) ----
+        if as_bool(getattr(cfg, 'eval_test_every_epoch', False)):
+            _t2 = _time.time()
+            te = eval_on_test_final(model_ul, ctx['model_re'], datasets, cfg, device)
+            t_sel += _time.time() - _t2
+            print(f"    📊 [test E{epoch:02d}] Df-AUC {te['Df_AUC']:.3f} Df-F1 {te['Df_F1']:.3f}  "
+                  f"Dt-AUC {te['Dt_AUC']:.3f} Dt-F1 {te['Dt_F1']:.3f}  "
+                  f"MIA {te['MIA']:.3f}/{te['MIA_paper']:.3f}  "
+                  f"fce/tce {te['forget_ce']:.2f}/{te['test_ce']:.2f}")
+            tcsv = getattr(cfg, 'test_history_csv_path', None)
+            if tcsv:
+                append_history_row(tcsv, {'method': method, 'id': str(getattr(cfg, 'id', '')),
+                    'seed': int(cfg.random_seed), 'epoch': epoch + 1,
+                    **{k: (round(v, 4) if isinstance(v, float) else v) for k, v in te.items()}})
 
         save_ckpt(ctx['out_dir'], epoch, model_ul, gates, optimizer, avg,
                   filename='latest.pt', val_ce=S['val_ce'], s_val=S['S_val'])
