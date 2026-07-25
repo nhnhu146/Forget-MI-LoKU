@@ -198,6 +198,14 @@ def main():
     cfg_d.setdefault('noise_std', 0.1)
     cfg_d.setdefault('weight_preset', 'auto')
     cfg_d = C.apply_overrides(cfg_d, cli.override)
+    # CAP BATCH (tự bảo vệ, không phụ thuộc notebook): train FULL 113M fp32 trên ảnh 2048²
+    # rất nặng → batch 16 OOM trên T4 14.5GB. Không cho vượt paper_max_batch (mặc định 8).
+    # Nếu vẫn OOM: chạy với --override paper_max_batch=4.
+    _cap = int(cfg_d.get('paper_max_batch', 8))
+    for _k in ('unlearn_batch_size', 'eval_batch_size'):
+        cfg_d[_k] = min(int(cfg_d.get(_k, _cap)), _cap)
+    print(f"   🧯 batch cap: unlearn={cfg_d['unlearn_batch_size']} eval={cfg_d['eval_batch_size']} "
+          f"(paper_max_batch={_cap})")
     cfg = C.Cfg(cfg_d)
 
     C.set_seed(int(cfg.random_seed))
