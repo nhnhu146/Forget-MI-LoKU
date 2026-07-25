@@ -1464,10 +1464,12 @@ def selection_metrics(model_ul, model_og, gates, datasets, forget_dl, rand_dl,
 
 
 @torch.no_grad()
-def eval_on_test_final(model_ul, model_re, datasets, cfg, device):
+def eval_on_test_final(model_ul, model_re, datasets, cfg, device, light=False):
     """Eval model SỐNG (LoRA active, eval-mode) trên D_t_final + D_f + MIA + 1−Sim(gold).
     Dùng để 'CHỌN EPOCH TỐT NHẤT' như cách tái lập Forget-MI (mỗi epoch ghi 1 dòng, rồi dò
-    epoch gần GOLD nhất). MIA: member=retain(subsample), non-member=D_t_final, đoán D_f."""
+    epoch gần GOLD nhất). MIA: member=retain(subsample), non-member=D_t_final, đoán D_f.
+    light=True: BỎ cosine_sim(gold) (forward gold 2×, nặng nhất) — dist_vs_re=nan. Dùng cho
+    vòng eval-mỗi-epoch (Cell 6 chọn epoch bằng Df-AUC/MIA/Dt, KHÔNG cần dist_vs_re) → nhanh hơn."""
     bs = int(cfg.eval_batch_size)
     emr = int(cfg.get('eval_max_retain', 512))
     member = subsample_dataset(datasets['retain'], emr, int(cfg.random_seed))
@@ -1480,10 +1482,13 @@ def eval_on_test_final(model_ul, model_re, datasets, cfg, device):
                'forget_ce': float('nan'), 'nonmember_ce': float('nan')}
     tm = perf_metrics(model_ul, datasets['test_final'], device, cfg, batch_size=bs)
     fm = perf_metrics(model_ul, datasets['forget'], device, cfg, batch_size=bs)
-    try:
-        cs = cosine_sim_models(model_ul, model_re, member, device, cfg, batch_size=bs)
-    except Exception:
-        cs = float('nan')
+    if light:
+        cs = float('nan')          # bỏ forward gold 2× cho vòng eval-mỗi-epoch
+    else:
+        try:
+            cs = cosine_sim_models(model_ul, model_re, member, device, cfg, batch_size=bs)
+        except Exception:
+            cs = float('nan')
     return {'Df_AUC': fm['AUC'], 'Df_F1': fm['Macro_F1'], 'Df_PairAUC': fm.get('Pairwise_AUC'),
             'Dt_AUC': tm['AUC'], 'Dt_F1': tm['Macro_F1'], 'Dt_PairAUC': tm.get('Pairwise_AUC'),
             'MIA': mia['persample'], 'MIA_paper': mia['paper'],
@@ -1561,7 +1566,8 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
         # ---- 'CHỌN EPOCH TỐT NHẤT': eval mỗi epoch trên D_t_final (như tái lập Forget-MI) ----
         if as_bool(getattr(cfg, 'eval_test_every_epoch', False)):
             _t2 = _time.time()
-            te = eval_on_test_final(model_ul, ctx['model_re'], datasets, cfg, device)
+            te = eval_on_test_final(model_ul, ctx['model_re'], datasets, cfg, device,
+                                    light=as_bool(getattr(cfg, 'eval_test_light', True)))
             t_sel += _time.time() - _t2
             print(f"    📊 [test E{epoch:02d}] Df-AUC {te['Df_AUC']:.3f} Df-F1 {te['Df_F1']:.3f}  "
                   f"Dt-AUC {te['Dt_AUC']:.3f} Dt-F1 {te['Dt_F1']:.3f}  "
