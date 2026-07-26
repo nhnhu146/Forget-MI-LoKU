@@ -131,22 +131,41 @@ class OnlineCESelector:
     của từng cách (tối đa ~4 file). finalize() eval các epoch được chọn trên D_t_final.
     RNG-safe (lưu/khôi phục RNG + train-mode + requires_grad) → KHÔNG lệch training/loss."""
 
-    def __init__(self, args, dataset, device, out_dir, split_seed=42, val_ratio=0.25):
+    def __init__(self, args, dataset, device, out_dir, split_seed=42, val_ratio=0.25,
+                 label='forgetmi', nm_val_ds=None, tfinal_ds=None,
+                 ce_fn=None, perf_fn=None, mia_fn=None, subsample_fn=None,
+                 state_fn=None, load_fn=None):
+        """Inject để dùng cho NHIỀU pipeline:
+          - Forget-MI (partial): mặc định (per_sample_ce/perf_metrics/run_mia của module này,
+            snapshot full state_dict), tự tách sel/tfinal từ dataset['test'].
+          - P3/P6 (adv_common): truyền nm_val_ds=datasets['sel'], tfinal_ds=datasets['test_final'],
+            ce_fn/perf_fn/mia_fn/subsample_fn = của adv_common, state_fn=trainable_state (LoRA)."""
         self.args, self.device, self.out = args, device, out_dir
         self.delta = float(getattr(args, 's4_delta', 0.15))
         self.bs = int(getattr(args, 'eval_batch_size', 16))
-        self.split_seed = split_seed
+        self.split_seed = split_seed; self.label = label
         self.forget_ds = dataset['forget']; self.retain_ds = dataset['retain']
-        self.nm_val_ds, self.tfinal_ds = make_nmval_tfinal(
-            dataset['test'], args.data_split_path, out_dir, split_seed, val_ratio)
-        self.rows = []; self.traj_csv = os.path.join(out_dir, 'forgetmi_selector.csv')
+        self.ce_fn = ce_fn or per_sample_ce
+        self.perf_fn = perf_fn or perf_metrics
+        self.mia_fn = mia_fn or run_mia
+        self.subsample_fn = subsample_fn or _subsample_dataset
+        self._snap = state_fn or (lambda m: {k: v.detach().cpu().clone()
+                                             for k, v in (m.module if hasattr(m, 'module') else m).state_dict().items()})
+        self._load = load_fn or (lambda m, s: (m.module if hasattr(m, 'module') else m).load_state_dict(s, strict=False))
+        os.makedirs(out_dir, exist_ok=True)
+        if nm_val_ds is not None and tfinal_ds is not None:
+            self.nm_val_ds, self.tfinal_ds = nm_val_ds, tfinal_ds
+            print(f"🧭 selector dùng sel/test_final có sẵn (nm_val={len(nm_val_ds)}, tfinal={len(tfinal_ds)})")
+        else:
+            self.nm_val_ds, self.tfinal_ds = make_nmval_tfinal(
+                dataset['test'], args.data_split_path, out_dir, split_seed, val_ratio)
+        self.rows = []; self.traj_csv = os.path.join(out_dir, f'{label}_selector.csv')
         self.s1 = None; self.s3 = None; self._prev_state = None; self._prev_crossed = False
         self.best_s2 = None; self.best_s4 = None
-        print(f"🧭 OnlineCESelector bật (out={out_dir}, s4_delta={self.delta})")
+        print(f"🧭 OnlineCESelector bật (label={label}, out={out_dir}, s4_delta={self.delta})")
 
     def _state(self, model):
-        m = model.module if hasattr(model, 'module') else model
-        return {k: v.detach().cpu().clone() for k, v in m.state_dict().items()}
+        return self._snap(model)
 
     def _flush_csv(self):
         with open(self.traj_csv, 'w', newline='') as f:
@@ -164,12 +183,12 @@ class OnlineCESelector:
         try:
             model.eval()
             with torch.no_grad():
-                f_ce = float(np.asarray(per_sample_ce(model, self.forget_ds, self.device, self.args, self.bs)).mean())
-                n_ce = float(np.asarray(per_sample_ce(model, self.nm_val_ds, self.device, self.args, self.bs)).mean())
-                vm = perf_metrics(model, self.nm_val_ds, self.device, self.args, batch_size=self.bs)
+                f_ce = float(np.asarray(self.ce_fn(model, self.forget_ds, self.device, self.args, self.bs)).mean())
+                n_ce = float(np.asarray(self.ce_fn(model, self.nm_val_ds, self.device, self.args, self.bs)).mean())
+                vm = self.perf_fn(model, self.nm_val_ds, self.device, self.args, batch_size=self.bs)
             gap = f_ce - n_ce; crossed = bool(gap >= 0.0)
             util = (float(vm['AUC']) + float(vm['Macro_F1'])) / 2.0
-            self.rows.append({'method': 'forgetmi', 'epoch': epoch, 'forget_ce': round(f_ce, 4),
+            self.rows.append({'method': self.label, 'epoch': epoch, 'forget_ce': round(f_ce, 4),
                               'nm_val_ce': round(n_ce, 4), 'ce_gap': round(gap, 4), 'crossed': int(crossed),
                               'val_AUC': round(float(vm['AUC']), 4), 'val_F1': round(float(vm['Macro_F1']), 4)})
             self._flush_csv()
@@ -202,17 +221,16 @@ class OnlineCESelector:
             torch.cuda.empty_cache()
 
     def _eval_tfinal(self, model, cpath):
-        m = model.module if hasattr(model, 'module') else model
-        m.load_state_dict(torch.load(cpath, map_location='cpu'), strict=False)
+        self._load(model, torch.load(cpath, map_location='cpu'))
         model.eval()
         with torch.no_grad():
-            fm = perf_metrics(model, self.forget_ds, self.device, self.args, batch_size=self.bs)
-            tm = perf_metrics(model, self.tfinal_ds, self.device, self.args, batch_size=self.bs)
-            member = _subsample_dataset(self.retain_ds, int(getattr(self.args, 'eval_max_retain', 512)), self.split_seed)
+            fm = self.perf_fn(model, self.forget_ds, self.device, self.args, batch_size=self.bs)
+            tm = self.perf_fn(model, self.tfinal_ds, self.device, self.args, batch_size=self.bs)
+            member = self.subsample_fn(self.retain_ds, int(getattr(self.args, 'eval_max_retain', 512)), self.split_seed)
             try:
-                mia = run_mia(model, member, self.tfinal_ds, self.forget_ds, self.device, self.args,
-                              batch_size=self.bs, seed=self.split_seed,
-                              paper_batch_size=int(getattr(self.args, 'mia_paper_batch_size', 32)))
+                mia = self.mia_fn(model, member, self.tfinal_ds, self.forget_ds, self.device, self.args,
+                                  batch_size=self.bs, seed=self.split_seed,
+                                  paper_batch_size=int(getattr(self.args, 'mia_paper_batch_size', 32)))
             except Exception as ex:
                 print('  MIA lỗi:', ex); mia = {'persample': float('nan'), 'paper': float('nan')}
         return {'Df_AUC': round(fm['AUC'], 4), 'Df_F1': round(fm['Macro_F1'], 4),
@@ -244,8 +262,7 @@ class OnlineCESelector:
             sr = next((x for x in self.rows if x['epoch'] == ep), {})
             r['forget_ce'] = sr.get('forget_ce'); r['nm_val_ce'] = sr.get('nm_val_ce')
             results[k] = r
-        m = model.module if hasattr(model, 'module') else model
-        m.load_state_dict(final_state, strict=False)         # khôi phục E-cuối
+        self._load(model, final_state)                       # khôi phục E-cuối
         json.dump({'selectors_gold_free': True, 's4_delta': self.delta, 'split_seed': self.split_seed,
                    'results': results}, open(os.path.join(self.out, 'selected_checkpoints.json'), 'w'), indent=2)
         print('\n' + '=' * 92)

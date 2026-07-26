@@ -1519,6 +1519,20 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
     t_train = t_sel = 0.0
     wall0 = _time.time()
 
+    # ----- CE-crossing selector gold-free (S1-S4) — bật bằng ce_selector=1. Dùng sel(=D_nm_val)
+    # + test_final CÓ SẴN, eval bằng hàm của adv_common, snapshot LoRA (trainable_state, ~2MB). -----
+    _ce_sel = None
+    if as_bool(getattr(cfg, 'ce_selector', False)):
+        from training.ce_selector_pilot import OnlineCESelector
+        _ce_sel = OnlineCESelector(
+            cfg, {'forget': datasets['forget'], 'retain': datasets['retain']}, device,
+            os.path.join(ctx['out_dir'], 'checkpoint_selection'),
+            label=str(method), split_seed=int(cfg.random_seed),
+            nm_val_ds=datasets['sel'], tfinal_ds=datasets['test_final'],
+            ce_fn=per_sample_ce, perf_fn=perf_metrics, mia_fn=run_mia, subsample_fn=subsample_dataset,
+            state_fn=lambda m: {k: v.detach().cpu().clone() for k, v in trainable_state_dict(m).items()},
+            load_fn=lambda m, s: m.load_state_dict(s, strict=False))
+
     for epoch in range(int(cfg.unlearn_epochs)):
         _t = _time.time()
         model_ul.train()
@@ -1602,6 +1616,14 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
                 'ur': avg.get('UR', 0), 'mr': avg.get('MR', 0), 'ce': avg.get('CE', 0),
                 'kd': avg.get('KD', 0), 'cum_optimizer_steps': total_steps,
             })
+
+        # ----- CE-crossing selector: eval CE + snapshot ứng viên epoch này (gold-free) -----
+        if _ce_sel is not None:
+            _ce_sel.step(epoch, model_ul)
+
+    # sau vòng lặp: chọn epoch theo 4 cách + eval selected trên D_t_final (gold-free)
+    if _ce_sel is not None:
+        _ce_sel.finalize(model_ul)
 
     if best['epoch'] is not None:
         cp = os.path.join(ctx['out_dir'], 'checkpoints')
