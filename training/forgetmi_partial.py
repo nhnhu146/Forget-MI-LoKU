@@ -570,6 +570,13 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
     # không chạy nên biến này (bình thường gán lại mỗi epoch) sẽ chưa tồn tại → return crash.
     retain_dataloader = None
 
+    # ----- CE-crossing selector (gold-free, INLINE) — bật bằng --override ce_selector_out=<dir>.
+    # KHÔNG đổi training/loss: chỉ eval read-only mỗi epoch (RNG-safe) + snapshot ứng viên. -----
+    _ce_sel = None
+    if getattr(args, 'ce_selector_out', None):
+        from training.ce_selector_pilot import OnlineCESelector
+        _ce_sel = OnlineCESelector(args, dataset, device, out_dir=str(args.ce_selector_out))
+
     for epoch in unlearning_iterator:
         _t_ep = time.time()
         model_ul.train()
@@ -808,6 +815,14 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
                   f"MIA={_pe.get('MIA')} MIA_paper={_pe.get('MIA_paper')} "
                   f"fce={_pe.get('forget_ce')} tce={_pe.get('test_ce')}")
             t_monitor += time.time() - _t_mon2
+
+        # ----- CE-crossing selector: eval CE + snapshot ứng viên epoch này (gold-free) -----
+        if _ce_sel is not None:
+            _ce_sel.step(epoch, model_ul)
+
+    # sau vòng lặp: chọn epoch theo 4 cách + eval selected trên D_t_final (gold-free)
+    if _ce_sel is not None:
+        _ce_sel.finalize(model_ul)
 
     checkpoint_dir = None
     best_checkpoint = None

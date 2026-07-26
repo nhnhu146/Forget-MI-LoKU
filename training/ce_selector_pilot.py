@@ -99,6 +99,161 @@ def _write_manifest_csv(path, rids, dicom_of, subj_of, lab_of):
             w.writerow([r, dicom_of[r], subj_of[r], lab_of[r]])
 
 
+def make_nmval_tfinal(test_ds, split_csv, out_dir, seed=42, val_ratio=0.25):
+    """Tách test_ds -> (nm_val_ds, tfinal_ds) theo bệnh nhân + phân tầng; lưu manifest + sanity."""
+    nm_idx, tf_idx, nm_rids, tf_rids, subj_of, lab_of, dicom_of = _split_test_by_patient(
+        test_ds, split_csv, seed, val_ratio)
+    nm_subj = set(subj_of[r] for r in nm_rids); tf_subj = set(subj_of[r] for r in tf_rids)
+    assert set(nm_rids).isdisjoint(set(tf_rids)), 'D_nm_val & D_t_final CHUNG report_id!'
+    assert nm_subj.isdisjoint(tf_subj), 'MỘT bệnh nhân ở CẢ D_nm_val và D_t_final!'
+    os.makedirs(out_dir, exist_ok=True)
+    dnm, dtf = _dist(nm_rids, lab_of, subj_of), _dist(tf_rids, lab_of, subj_of)
+    print(f"[split] test={len(nm_rids) + len(tf_rids)}  D_nm_val(25%)={dnm['n']}(pat {dnm['n_patients']})  "
+          f"D_t_final(75%)={dtf['n']}(pat {dtf['n_patients']})  patient/id disjoint OK")
+    _write_manifest_csv(os.path.join(out_dir, f'nonmember_val_25_s{seed}.csv'), nm_rids, dicom_of, subj_of, lab_of)
+    _write_manifest_csv(os.path.join(out_dir, f'final_test_75_s{seed}.csv'), tf_rids, dicom_of, subj_of, lab_of)
+    json.dump({'split_seed': seed, 'nonmember_val_ratio': val_ratio, 'D_nm_val': dnm, 'D_t_final': dtf,
+               'patient_disjoint': True, 'id_disjoint': True},
+              open(os.path.join(out_dir, 'split_manifest.json'), 'w'), indent=2)
+    return Subset(test_ds, nm_idx), Subset(test_ds, tf_idx)
+
+
+class OnlineCESelector:
+    """Chọn checkpoint gold-free NGAY TRONG lúc train — KHÔNG cần lưu 30 checkpoint.
+    Mỗi epoch: eval CE (D_f + D_nm_val) + utility, cập nhật 4 selector S1–S4, snapshot ỨNG VIÊN
+    của từng cách (tối đa ~4 file). finalize() eval các epoch được chọn trên D_t_final.
+    RNG-safe (lưu/khôi phục RNG + train-mode + requires_grad) → KHÔNG lệch training/loss."""
+
+    def __init__(self, args, dataset, device, out_dir, split_seed=42, val_ratio=0.25):
+        self.args, self.device, self.out = args, device, out_dir
+        self.delta = float(getattr(args, 's4_delta', 0.15))
+        self.bs = int(getattr(args, 'eval_batch_size', 16))
+        self.split_seed = split_seed
+        self.forget_ds = dataset['forget']; self.retain_ds = dataset['retain']
+        self.nm_val_ds, self.tfinal_ds = make_nmval_tfinal(
+            dataset['test'], args.data_split_path, out_dir, split_seed, val_ratio)
+        self.rows = []; self.traj_csv = os.path.join(out_dir, 'forgetmi_selector.csv')
+        self.s1 = None; self.s3 = None; self._prev_state = None; self._prev_crossed = False
+        self.best_s2 = None; self.best_s4 = None
+        print(f"🧭 OnlineCESelector bật (out={out_dir}, s4_delta={self.delta})")
+
+    def _state(self, model):
+        m = model.module if hasattr(model, 'module') else model
+        return {k: v.detach().cpu().clone() for k, v in m.state_dict().items()}
+
+    def _flush_csv(self):
+        with open(self.traj_csv, 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=['method', 'epoch', 'forget_ce', 'nm_val_ce',
+                                              'ce_gap', 'crossed', 'val_AUC', 'val_F1'])
+            w.writeheader(); w.writerows(self.rows)
+
+    def step(self, epoch, model):
+        import random as _random
+        cpu_rng = torch.get_rng_state()
+        cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        py_rng = _random.getstate(); np_rng = np.random.get_state()
+        was_training = model.training
+        grad = [p.requires_grad for p in model.parameters()]
+        try:
+            model.eval()
+            with torch.no_grad():
+                f_ce = float(np.asarray(per_sample_ce(model, self.forget_ds, self.device, self.args, self.bs)).mean())
+                n_ce = float(np.asarray(per_sample_ce(model, self.nm_val_ds, self.device, self.args, self.bs)).mean())
+                vm = perf_metrics(model, self.nm_val_ds, self.device, self.args, batch_size=self.bs)
+            gap = f_ce - n_ce; crossed = bool(gap >= 0.0)
+            util = (float(vm['AUC']) + float(vm['Macro_F1'])) / 2.0
+            self.rows.append({'method': 'forgetmi', 'epoch': epoch, 'forget_ce': round(f_ce, 4),
+                              'nm_val_ce': round(n_ce, 4), 'ce_gap': round(gap, 4), 'crossed': int(crossed),
+                              'val_AUC': round(float(vm['AUC']), 4), 'val_F1': round(float(vm['Macro_F1']), 4)})
+            self._flush_csv()
+            print(f"    🧭 [selector E{epoch:02d}] fce {f_ce:.4f} nm_ce {n_ce:.4f} gap {gap:+.4f} "
+                  f"cross {crossed} | valAUC {vm['AUC']:.3f} valF1 {vm['Macro_F1']:.3f}")
+            _cur = {}
+            def S():
+                if 'v' not in _cur:
+                    _cur['v'] = self._state(model)
+                return _cur['v']
+            if crossed and self.s1 is None:
+                self.s1 = epoch; torch.save(S(), os.path.join(self.out, 'cand_S1.pt'))
+            if crossed and self._prev_crossed and self.s3 is None and self._prev_state is not None:
+                self.s3 = epoch - 1; torch.save(self._prev_state, os.path.join(self.out, 'cand_S3.pt'))
+            if self.best_s2 is None or abs(gap) < self.best_s2[1]:
+                self.best_s2 = (epoch, abs(gap)); torch.save(S(), os.path.join(self.out, 'cand_S2.pt'))
+            if abs(gap) <= self.delta and (self.best_s4 is None or util > self.best_s4[1]):
+                self.best_s4 = (epoch, util); torch.save(S(), os.path.join(self.out, 'cand_S4.pt'))
+            self._prev_crossed = crossed
+            self._prev_state = None if self.s3 is not None else S()   # giữ cho S3 epoch sau
+        finally:
+            if was_training:
+                model.train()
+            for p, g in zip(model.parameters(), grad):
+                p.requires_grad = g
+            torch.set_rng_state(cpu_rng)
+            if cuda_rng is not None:
+                torch.cuda.set_rng_state_all(cuda_rng)
+            _random.setstate(py_rng); np.random.set_state(np_rng)
+            torch.cuda.empty_cache()
+
+    def _eval_tfinal(self, model, cpath):
+        m = model.module if hasattr(model, 'module') else model
+        m.load_state_dict(torch.load(cpath, map_location='cpu'), strict=False)
+        model.eval()
+        with torch.no_grad():
+            fm = perf_metrics(model, self.forget_ds, self.device, self.args, batch_size=self.bs)
+            tm = perf_metrics(model, self.tfinal_ds, self.device, self.args, batch_size=self.bs)
+            member = _subsample_dataset(self.retain_ds, int(getattr(self.args, 'eval_max_retain', 512)), self.split_seed)
+            try:
+                mia = run_mia(model, member, self.tfinal_ds, self.forget_ds, self.device, self.args,
+                              batch_size=self.bs, seed=self.split_seed,
+                              paper_batch_size=int(getattr(self.args, 'mia_paper_batch_size', 32)))
+            except Exception as ex:
+                print('  MIA lỗi:', ex); mia = {'persample': float('nan'), 'paper': float('nan')}
+        return {'Df_AUC': round(fm['AUC'], 4), 'Df_F1': round(fm['Macro_F1'], 4),
+                'Dt_AUC': round(tm['AUC'], 4), 'Dt_F1': round(tm['Macro_F1'], 4),
+                'MIA': round(float(mia['persample']), 4), 'MIA_paper': round(float(mia['paper']), 4)}
+
+    def finalize(self, model):
+        picks = {'S1_first_crossing': self.s1,
+                 'S2_closest_ce': self.best_s2[0] if self.best_s2 else None,
+                 'S3_first_stable_crossing': self.s3,
+                 'S4_ce_match_utility': self.best_s4[0] if self.best_s4 else (self.best_s2[0] if self.best_s2 else None)}
+        candfile = {'S1_first_crossing': 'cand_S1.pt', 'S2_closest_ce': 'cand_S2.pt',
+                    'S3_first_stable_crossing': 'cand_S3.pt',
+                    'S4_ce_match_utility': 'cand_S4.pt' if self.best_s4 else 'cand_S2.pt'}
+        print('\n===== EPOCH CHỌN THEO 4 CÁCH (gold-free, inline) =====')
+        for k, v in picks.items():
+            print(f"  {k:26} -> {('E' + str(v)) if v is not None else 'NO CROSSING'}")
+        final_state = self._state(model)                    # giữ E-cuối để khôi phục
+        results, cache = {}, {}
+        for k, ep in picks.items():
+            if ep is None:
+                results[k] = {'epoch': None, 'note': 'no_crossing'}; continue
+            cf = os.path.join(self.out, candfile[k])
+            if not os.path.exists(cf):
+                results[k] = {'epoch': ep, 'note': 'no_snapshot'}; continue
+            if candfile[k] not in cache:
+                cache[candfile[k]] = self._eval_tfinal(model, cf)
+            r = dict(cache[candfile[k]]); r['epoch'] = ep
+            sr = next((x for x in self.rows if x['epoch'] == ep), {})
+            r['forget_ce'] = sr.get('forget_ce'); r['nm_val_ce'] = sr.get('nm_val_ce')
+            results[k] = r
+        m = model.module if hasattr(model, 'module') else model
+        m.load_state_dict(final_state, strict=False)         # khôi phục E-cuối
+        json.dump({'selectors_gold_free': True, 's4_delta': self.delta, 'split_seed': self.split_seed,
+                   'results': results}, open(os.path.join(self.out, 'selected_checkpoints.json'), 'w'), indent=2)
+        print('\n' + '=' * 92)
+        print(f"{'selector':28}{'epoch':>6}{'Df-AUC':>9}{'Df-F1':>8}{'Dt-AUC':>9}{'Dt-F1':>8}{'MIA':>8}")
+        print('-' * 92)
+        for k, ep in picks.items():
+            r = results[k]
+            if ep is None or 'Df_AUC' not in r:
+                print(f"{k:28}{('E' + str(ep)) if ep is not None else '—':>6}{'(no ckpt)':>34}"); continue
+            print(f"{k:28}{('E' + str(ep)):>6}{r['Df_AUC']:>9}{r['Df_F1']:>8}{r['Dt_AUC']:>9}"
+                  f"{r['Dt_F1']:>8}{r['MIA']:>8}")
+        print('=' * 92)
+        print('Output:', self.out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--config', required=True)
