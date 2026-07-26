@@ -1526,7 +1526,7 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
         from training.ce_selector_pilot import OnlineCESelector
         _ce_sel = OnlineCESelector(
             cfg, {'forget': datasets['forget'], 'retain': datasets['retain']}, device,
-            os.path.join(ctx['out_dir'], 'checkpoint_selection'),
+            os.path.join(ctx['out_dir'], f'checkpoint_selection_{method}'),   # riêng mỗi method
             label=str(method), split_seed=int(cfg.random_seed),
             nm_val_ds=datasets['sel'], tfinal_ds=datasets['test_final'],
             ce_fn=per_sample_ce, perf_fn=perf_metrics, mia_fn=run_mia, subsample_fn=subsample_dataset,
