@@ -62,28 +62,35 @@ def _load_state(path):
 
 def _split_test_by_patient(test_ds, split_csv, seed, val_ratio):
     """Tách test_ds -> (nm_val_idx, tfinal_idx) theo bệnh nhân + phân tầng nhãn.
-    Dùng thứ tự KHÓA của test_ds.all_img_txt_ids (đã lọc) làm index dataset."""
-    rids = list(test_ds.all_img_txt_ids.keys())                 # report_id, đúng thứ tự dataset
-    dicom_of = test_ds.all_img_txt_ids                          # report_id -> dicom_id
-    # dicom_id -> subject_id từ split CSV (để group theo bệnh nhân)
-    import pandas as pd
-    df = pd.read_csv(split_csv).astype(str)
-    d2s = dict(zip(df['dicom_id'], df['subject_id']))
+    Dùng thứ tự KHÓA của test_ds.all_img_txt_ids (đã lọc) làm index dataset.
+    LƯU Ý: KHÓA của all_img_txt_ids CHÍNH LÀ dicom_id (ảnh) — model_utils.__getitem__ so khóa
+    với cột 'dicom_id' của CSV. VALUE mới là txt/study id. → tra subject bằng d2s[key]."""
+    keys = list(test_ds.all_img_txt_ids.keys())                 # = dicom_id (đúng thứ tự dataset)
+    txtid_of = test_ds.all_img_txt_ids                          # dicom_id -> txt/study id
+    # dicom_id -> subject_id: đọc bằng csv.reader Y HỆT data_split (khóa khớp ký tự tuyệt đối)
+    d2s = {}
+    with open(split_csv, 'r') as f:
+        rd = csv.reader(f); next(rd, None)
+        for row in rd:
+            if len(row) < 3:
+                continue
+            d2s[row[2]] = row[0]                                # dicom_id (row[2]=khóa) -> subject_id (row[0])
     subjects, labels, keep = [], [], []
-    for r in rids:
-        dic = str(dicom_of[r])
-        if dic not in d2s:
+    for k in keys:
+        if k not in d2s:
             continue
-        subjects.append(d2s[dic]); labels.append(int(float(test_ds.all_img_labels[r][0]))); keep.append(r)
+        subjects.append(d2s[k]); labels.append(int(float(test_ds.all_img_labels[k][0]))); keep.append(k)
+    assert keep, (f"0 mẫu test khớp CSV — kiểm tra cột dicom_id của {split_csv} "
+                  f"(sample key: {keys[:3]}; sample csv dicom: {list(d2s)[:3]})")
     n_splits = max(2, round(1.0 / val_ratio))                   # 0.25 -> 4
     nm_rids, tf_rids = _grouped_stratified_holdout(keep, subjects, labels, n_splits=n_splits, seed=seed)
     nm_set, tf_set = set(nm_rids), set(tf_rids)
-    pos = {r: i for i, r in enumerate(rids)}
-    nm_idx = [pos[r] for r in rids if r in nm_set]
-    tf_idx = [pos[r] for r in rids if r in tf_set]
-    subj_of = {r: d2s[str(dicom_of[r])] for r in keep}
-    lab_of = {r: int(float(test_ds.all_img_labels[r][0])) for r in keep}
-    return nm_idx, tf_idx, nm_rids, tf_rids, subj_of, lab_of, dicom_of
+    pos = {k: i for i, k in enumerate(keys)}
+    nm_idx = [pos[k] for k in keys if k in nm_set]
+    tf_idx = [pos[k] for k in keys if k in tf_set]
+    subj_of = {k: d2s[k] for k in keep}
+    lab_of = {k: int(float(test_ds.all_img_labels[k][0])) for k in keep}
+    return nm_idx, tf_idx, nm_rids, tf_rids, subj_of, lab_of, txtid_of
 
 
 def _dist(rids, lab_of, subj_of):
