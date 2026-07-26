@@ -1,18 +1,20 @@
 """Gold-free CE-crossing checkpoint selector — PILOT trên Forget-MI.
 
-MỤC TIÊU: kiểm tra 1 quy tắc chọn checkpoint KHÔNG dùng GOLD/retrained, KHÔNG dùng final test:
-    e* = epoch ĐẦU TIÊN có  forget_ce(e) >= nm_val_ce(e)
-  (CE trên forget set D_f >= CE trên non-member validation D_nm_val)
-Nếu 30 epoch KHÔNG có crossing → chỉ báo 'no crossing' (CHƯA fallback, theo yêu cầu pilot).
+MỤC TIÊU: so sánh 4 cách chọn checkpoint — ĐỀU KHÔNG dùng GOLD/retrained, KHÔNG dùng final test:
+    S1 First Crossing     : epoch đầu tiên forget_ce >= nm_val_ce
+    S2 Closest CE         : epoch argmin |forget_ce - nm_val_ce|
+    S3 First Stable Cross : crossing giữ 2 epoch liên tiếp (chống nhiễu 1 epoch)
+    S4 CE-match + Utility  : trong {|forget_ce - nm_val_ce| <= δ}, chọn (AUC+F1)/2 cao nhất
+  (CE trên forget set D_f vs non-member validation D_nm_val). S1/S3 có thể 'no crossing'.
 
 KHÔNG sửa training/loss của Forget-MI. Script này chạy OFFLINE, đọc 30 checkpoint E0–E29
 đã lưu bởi Forget-MI ở chế độ non-dual (output_dir/epoch_<e>/model_state_dict.pth), rồi:
   1) Tách test_full (seed 42, patient-level + stratified) -> 25% D_nm_val / 75% D_t_final,
      lưu manifest + sanity checks (disjoint patient/id).
   2) Với TỪNG checkpoint: load ở eval()/no_grad(), tính forget_ce (D_f) + nm_val_ce (D_nm_val)
-     bằng CÙNG evaluator (per_sample_ce), KHÔNG noise/augmentation. Ghi trajectory CSV.
-  3) Chọn epoch đầu tiên gap = forget_ce - nm_val_ce >= 0.
-  4) SAU KHI chọn xong mới eval selected checkpoint trên D_t_final: Df-AUC/F1, Dt-AUC/F1, MIA.
+     bằng CÙNG evaluator (per_sample_ce) + utility (AUC/F1 trên D_nm_val), KHÔNG noise/aug.
+  3) Áp 4 selector S1–S4 lên trajectory (thuần logic, gold-free).
+  4) SAU KHI chọn xong mới eval MỖI epoch-được-chọn trên D_t_final: Df-AUC/F1, Dt-AUC/F1, MIA.
 
 Output (mặc định ./checkpoint_selection/):
   split_manifest.json, nonmember_val_25_s42.csv, final_test_75_s42.csv,
@@ -108,6 +110,8 @@ def main():
     ap.add_argument('--max_epochs', type=int, default=30)
     ap.add_argument('--nm_val_ratio', type=float, default=0.25)
     ap.add_argument('--split_seed', type=int, default=42)
+    ap.add_argument('--s4_delta', type=float, default=0.15,
+                    help='S4: nguong |forget_ce - nm_val_ce| <= delta de coi la "khop unseen"')
     cli = ap.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -145,10 +149,10 @@ def main():
                'patient_disjoint': True, 'id_disjoint': True},
               open(os.path.join(cli.out_dir, 'split_manifest.json'), 'w'), indent=2)
 
-    # ---- 3) eval CE mỗi checkpoint E0..E(max-1) trên D_f + D_nm_val (cùng evaluator) ----
+    # ---- 2) eval mỗi checkpoint E0..E(max-1): forget_ce (D_f) + nm_val_ce + utility (D_nm_val) ----
     traj_csv = os.path.join(cli.out_dir, 'forgetmi_selector.csv')
-    rows, selected = [], None
-    print('\n[trajectory] epoch  forget_ce  nm_val_ce   gap    crossed')
+    rows = []
+    print('\n[trajectory] epoch  forget_ce  nm_val_ce    gap    crossed  val_AUC  val_F1')
     for e in range(cli.max_epochs):
         ckpt = os.path.join(cli.checkpoints_dir, f'epoch_{e}', 'model_state_dict.pth')
         if not os.path.exists(ckpt):
@@ -156,53 +160,108 @@ def main():
         model.load_state_dict(_load_state(ckpt), strict=False)
         f_ce = _mean_ce(model, forget_ds, device, cfg, bs)
         n_ce = _mean_ce(model, nm_val_ds, device, cfg, bs)
+        model.eval()
+        with torch.no_grad():
+            vm = perf_metrics(model, nm_val_ds, device, cfg, batch_size=bs)   # utility gold-free
         gap = f_ce - n_ce; crossed = bool(gap >= 0.0)
         rows.append({'method': 'forgetmi', 'epoch': e, 'forget_ce': round(f_ce, 4),
-                     'nm_val_ce': round(n_ce, 4), 'ce_gap': round(gap, 4), 'crossed': int(crossed)})
-        print(f"  E{e:02d}   {f_ce:7.4f}   {n_ce:7.4f}  {gap:+7.4f}    {crossed}")
-        if crossed and selected is None:
-            selected = e                                        # 4) epoch ĐẦU TIÊN crossing
+                     'nm_val_ce': round(n_ce, 4), 'ce_gap': round(gap, 4), 'crossed': int(crossed),
+                     'val_AUC': round(float(vm['AUC']), 4), 'val_F1': round(float(vm['Macro_F1']), 4)})
+        print(f"  E{e:02d}   {f_ce:7.4f}   {n_ce:7.4f}  {gap:+7.4f}    {str(crossed):5}  "
+              f"{vm['AUC']:6.3f}  {vm['Macro_F1']:6.3f}")
     with open(traj_csv, 'w', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=['method', 'epoch', 'forget_ce', 'nm_val_ce', 'ce_gap', 'crossed'])
+        w = csv.DictWriter(f, fieldnames=['method', 'epoch', 'forget_ce', 'nm_val_ce', 'ce_gap',
+                                          'crossed', 'val_AUC', 'val_F1'])
         w.writeheader(); w.writerows(rows)
+    if not rows:
+        print('KHÔNG có checkpoint nào để chấm. Dừng.'); return
 
-    # ---- 4) kết quả selector ----
-    out = {'selector': 'first_forget_ce_ge_nonmember_ce', 'max_epochs': cli.max_epochs,
-           'split_seed': cli.split_seed, 'nonmember_val_ratio': cli.nm_val_ratio, 'forgetmi': {}}
-    if selected is None:
-        print('\n>>> NO CROSSING trong', cli.max_epochs, 'epoch — chưa dùng fallback (theo pilot).')
-        out['forgetmi'] = {'epoch': None, 'crossed': False, 'note': 'no_crossing_within_max_epochs'}
-        json.dump(out, open(os.path.join(cli.out_dir, 'selected_checkpoints.json'), 'w'), indent=2)
-        print('Đã lưu trajectory + manifest. Dừng (không có epoch được chọn).'); return
+    # ---- 3) áp 4 selector (đều gold-free, không dùng D_t_final) ----
+    eps = [r['epoch'] for r in rows]
+    gap = {r['epoch']: r['ce_gap'] for r in rows}
+    util = {r['epoch']: (r['val_AUC'] + r['val_F1']) / 2.0 for r in rows}
 
-    srow = next(r for r in rows if r['epoch'] == selected)
-    print(f"\n>>> SELECTED epoch = E{selected}  (forget_ce {srow['forget_ce']} >= nm_val_ce {srow['nm_val_ce']})")
+    def s1_first_crossing():
+        for e in eps:
+            if gap[e] >= 0:
+                return e
+        return None
 
-    # ---- 7) SAU KHI chọn mới eval selected trên D_t_final ----
-    print('[final] eval selected checkpoint trên D_t_final (75%)...')
-    model.load_state_dict(_load_state(os.path.join(cli.checkpoints_dir, f'epoch_{selected}', 'model_state_dict.pth')), strict=False)
-    model.eval()
-    with torch.no_grad():
-        fm = perf_metrics(model, forget_ds, device, cfg, batch_size=bs)
-        tm = perf_metrics(model, tfinal_ds, device, cfg, batch_size=bs)
-        member = _subsample_dataset(retain_ds, int(cfg.get('eval_max_retain', 512)), cli.split_seed)
-        try:
-            mia = run_mia(model, member, tfinal_ds, forget_ds, device, cfg, batch_size=bs,
-                          seed=cli.split_seed, paper_batch_size=int(cfg.get('mia_paper_batch_size', 32)))
-        except Exception as ex:
-            print('  MIA lỗi:', ex); mia = {'persample': float('nan'), 'paper': float('nan')}
-    fin = {'epoch': selected, 'crossed': True, 'fallback': False,
-           'forget_ce': srow['forget_ce'], 'nm_val_ce': srow['nm_val_ce'],
-           'Df_AUC': round(fm['AUC'], 4), 'Df_F1': round(fm['Macro_F1'], 4),
-           'Dt_AUC': round(tm['AUC'], 4), 'Dt_F1': round(tm['Macro_F1'], 4),
-           'MIA': round(float(mia['persample']), 4), 'MIA_paper': round(float(mia['paper']), 4)}
-    out['forgetmi'] = fin
+    def s2_closest_ce():
+        return min(eps, key=lambda e: abs(gap[e]))
+
+    def s3_first_stable_crossing():
+        for i in range(len(eps) - 1):
+            if gap[eps[i]] >= 0 and gap[eps[i + 1]] >= 0:
+                return eps[i]
+        return None
+
+    def s4_ce_match_utility(delta):
+        match = [e for e in eps if abs(gap[e]) <= delta]
+        if not match:                       # rỗng -> lấy epoch CE gần nhất (khớp unseen nhất)
+            match = [s2_closest_ce()]
+        return max(match, key=lambda e: util[e]), sorted(match)
+
+    s4_e, s4_match = s4_ce_match_utility(cli.s4_delta)
+    picks = {'S1_first_crossing': s1_first_crossing(),
+             'S2_closest_ce': s2_closest_ce(),
+             'S3_first_stable_crossing': s3_first_stable_crossing(),
+             'S4_ce_match_utility': s4_e}
+    print('\n===== EPOCH CHỌN THEO 4 CÁCH (gold-free) =====')
+    for k, v in picks.items():
+        print(f"  {k:26} -> {('E' + str(v)) if v is not None else 'NO CROSSING'}")
+    print(f"  (S4: E_match |gap|<= {cli.s4_delta} = {['E' + str(e) for e in s4_match]})")
+
+    # ---- 4) SAU KHI chọn mới eval mỗi epoch-được-chọn trên D_t_final (cache theo epoch) ----
+    def _final_eval(e):
+        model.load_state_dict(_load_state(os.path.join(cli.checkpoints_dir, f'epoch_{e}',
+                                                       'model_state_dict.pth')), strict=False)
+        model.eval()
+        with torch.no_grad():
+            fm = perf_metrics(model, forget_ds, device, cfg, batch_size=bs)
+            tm = perf_metrics(model, tfinal_ds, device, cfg, batch_size=bs)
+            member = _subsample_dataset(retain_ds, int(cfg.get('eval_max_retain', 512)), cli.split_seed)
+            try:
+                mia = run_mia(model, member, tfinal_ds, forget_ds, device, cfg, batch_size=bs,
+                              seed=cli.split_seed, paper_batch_size=int(cfg.get('mia_paper_batch_size', 32)))
+            except Exception as ex:
+                print('  MIA lỗi:', ex); mia = {'persample': float('nan'), 'paper': float('nan')}
+        sr = next(r for r in rows if r['epoch'] == e)
+        return {'epoch': e, 'forget_ce': sr['forget_ce'], 'nm_val_ce': sr['nm_val_ce'],
+                'val_AUC': sr['val_AUC'], 'val_F1': sr['val_F1'],
+                'Df_AUC': round(fm['AUC'], 4), 'Df_F1': round(fm['Macro_F1'], 4),
+                'Dt_AUC': round(tm['AUC'], 4), 'Dt_F1': round(tm['Macro_F1'], 4),
+                'MIA': round(float(mia['persample']), 4), 'MIA_paper': round(float(mia['paper']), 4)}
+
+    print('\n[final] eval các epoch được chọn trên D_t_final (75%)...')
+    cache = {}
+    for e in picks.values():
+        if e is not None and e not in cache:
+            cache[e] = _final_eval(e)
+
+    out = {'selectors_gold_free': True, 'max_epochs': cli.max_epochs, 'split_seed': cli.split_seed,
+           'nonmember_val_ratio': cli.nm_val_ratio, 's4_delta': cli.s4_delta, 's4_match_epochs': s4_match,
+           'results': {}}
+    for k, e in picks.items():
+        out['results'][k] = {'epoch': None, 'note': 'no_crossing'} if e is None else dict(cache[e])
     json.dump(out, open(os.path.join(cli.out_dir, 'selected_checkpoints.json'), 'w'), indent=2)
-    print('─' * 64)
-    print(f"  Forget-MI @E{selected}: Df-AUC {fin['Df_AUC']}  Df-F1 {fin['Df_F1']}  "
-          f"Dt-AUC {fin['Dt_AUC']}  Dt-F1 {fin['Dt_F1']}  MIA {fin['MIA']}")
-    print('─' * 64)
-    print('Output:', cli.out_dir, '(split_manifest.json, *_25/75_s42.csv, forgetmi_selector.csv, selected_checkpoints.json)')
+
+    # bảng so sánh
+    print('\n' + '=' * 96)
+    print(f"{'selector':28}{'epoch':>6}{'Df-AUC':>9}{'Df-F1':>8}{'Dt-AUC':>9}{'Dt-F1':>8}{'MIA':>8}")
+    print('-' * 96)
+    for k, e in picks.items():
+        if e is None:
+            print(f"{k:28}{'—':>6}{'(no crossing)':>25}"); continue
+        r = cache[e]
+        print(f"{k:28}{('E' + str(e)):>6}{r['Df_AUC']:>9}{r['Df_F1']:>8}{r['Dt_AUC']:>9}"
+              f"{r['Dt_F1']:>8}{r['MIA']:>8}")
+    print('=' * 96)
+    uniq = sorted(set(e for e in picks.values() if e is not None))
+    print(f"4 cách -> {len(uniq)} epoch khác nhau: {['E' + str(e) for e in uniq]}  "
+          f"({'ĐỒNG THUẬN cao' if len(uniq) <= 2 else 'phân tán'})")
+    print('Output:', cli.out_dir,
+          '(split_manifest.json, *_25/75_s42.csv, forgetmi_selector.csv, selected_checkpoints.json)')
 
 
 if __name__ == '__main__':
