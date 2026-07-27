@@ -226,22 +226,27 @@ def data_split_advanced(split_list_path, forget_ids_path, seed=42,
     rand_l, rand_ids = {}, {}
 
     with open(split_list_path, 'r') as f:
-        reader = csv.reader(f); next(reader)
+        reader = csv.reader(f); hdr = next(reader) or []
+        ix = {str(n).strip().lower(): i for i, n in enumerate(hdr)}      # đọc theo TÊN cột (bền IU)
+        i_sub = ix.get('subject_id', 0); i_key = ix.get('dicom_id', 2)   # key = dicom_id (ảnh)
+        i_val = ix.get('study_id', ix.get('report_id', 1))               # value = study/text id
+        i_lab = ix.get('edeme_severity', ix.get('label', ix.get('severity', 3)))
+        i_spl = ix.get('fold', ix.get('split', len(hdr) - 1))
         for row in reader:
-            if len(row) < 4 or row[3] == 'edeme_severity':
+            if len(row) <= max(i_sub, i_key, i_val, i_lab, i_spl):
                 continue
             try:
-                sev = float(row[3])
+                sev = float(row[i_lab])
             except ValueError:
                 continue
-            rid = row[2]; subj = row[0]
-            if row[0] in forget_set:
-                forget_l[rid] = [sev]; forget_ids[rid] = row[1]
-                rand_l[rid] = [sev];   rand_ids[rid] = row[1]
-            elif row[-1] == 'TEST':
-                test_l[rid] = [sev]; test_ids[rid] = row[1]; test_grp[rid] = subj
+            rid = row[i_key]; subj = row[i_sub]
+            if subj in forget_set:
+                forget_l[rid] = [sev]; forget_ids[rid] = row[i_val]
+                rand_l[rid] = [sev];   rand_ids[rid] = row[i_val]
+            elif str(row[i_spl]).strip().upper() == 'TEST':
+                test_l[rid] = [sev]; test_ids[rid] = row[i_val]; test_grp[rid] = subj
             else:
-                train_l[rid] = [sev]; train_ids[rid] = row[1]; train_grp[rid] = subj
+                train_l[rid] = [sev]; train_ids[rid] = row[i_val]; train_grp[rid] = subj
 
     # ---- chia TEST → sel (25%) + test_final (75%) theo bệnh nhân + phân tầng ----
     t_keys = list(test_ids.keys())

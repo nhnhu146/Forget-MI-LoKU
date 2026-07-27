@@ -330,27 +330,32 @@ def data_split(split_list_path, forget_ids_path, rand_ratio, validation_ratio=0.
 
         train_label_file_reader = csv.reader(train_label_file)
         header = next(train_label_file_reader)
+        ix = {str(n).strip().lower(): i for i, n in enumerate(header)}   # đọc theo TÊN cột (bền IU đổi thứ tự)
+        i_sub = ix.get('subject_id', 0); i_key = ix.get('dicom_id', 2)   # key = dicom_id (ảnh)
+        i_val = ix.get('study_id', ix.get('report_id', 1))              # value = study/text id
+        i_lab = ix.get('edeme_severity', ix.get('label', ix.get('severity', 3)))
+        i_spl = ix.get('fold', ix.get('split', len(header) - 1))
 
         for row in train_label_file_reader:
-            if row == header or row[3] == 'edeme_severity':
+            if len(row) <= max(i_sub, i_key, i_val, i_lab, i_spl):
                 continue
             try:
-                severity = float(row[3])
+                severity = float(row[i_lab])
             except ValueError:
                 continue
-            if row[0] in forget_ids:
-                forget_labels[row[2]] = [severity]
-                forget_img_txt_ids[row[2]] = row[1]
+            if row[i_sub] in forget_ids:
+                forget_labels[row[i_key]] = [severity]
+                forget_img_txt_ids[row[i_key]] = row[i_val]
 
-                rand_labels[row[2]] = [severity]
-                rand_img_txt_ids[row[2]] = row[1]
+                rand_labels[row[i_key]] = [severity]
+                rand_img_txt_ids[row[i_key]] = row[i_val]
             else:
-                if row[-1] == 'TEST':
-                    test_labels[row[2]] = [severity]
-                    test_img_txt_ids[row[2]] = row[1]
+                if str(row[i_spl]).strip().upper() == 'TEST':
+                    test_labels[row[i_key]] = [severity]
+                    test_img_txt_ids[row[i_key]] = row[i_val]
                 else:
-                    train_labels[row[2]] = [severity]
-                    train_img_txt_ids[row[2]] = row[1]
+                    train_labels[row[i_key]] = [severity]
+                    train_img_txt_ids[row[i_key]] = row[i_val]
 
     # VALIDATION DATASET
     train_ids = list(train_img_txt_ids.keys())

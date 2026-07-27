@@ -70,11 +70,13 @@ def _split_test_by_patient(test_ds, split_csv, seed, val_ratio):
     # dicom_id -> subject_id: đọc bằng csv.reader Y HỆT data_split (khóa khớp ký tự tuyệt đối)
     d2s = {}
     with open(split_csv, 'r') as f:
-        rd = csv.reader(f); next(rd, None)
+        rd = csv.reader(f); hdr = next(rd, None) or []
+        ix = {str(n).strip().lower(): i for i, n in enumerate(hdr)}
+        i_dic = ix.get('dicom_id', 2); i_sub = ix.get('subject_id', 0)   # theo TÊN cột (bền IU đổi thứ tự)
         for row in rd:
-            if len(row) < 3:
+            if len(row) <= max(i_dic, i_sub):
                 continue
-            d2s[row[2]] = row[0]                                # dicom_id (row[2]=khóa) -> subject_id (row[0])
+            d2s[row[i_dic]] = row[i_sub]                        # dicom_id (khóa) -> subject_id
     subjects, labels, keep = [], [], []
     for k in keys:
         if k not in d2s:
