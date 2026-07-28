@@ -411,6 +411,10 @@ def build_dataset(args, tokenizer):
     #   use_noise=false → og_rnd = og(ảnh SẠCH + text synonym)     [ABLATION riêng]
     # (text luôn nhiễu vì tập random dùng noisy_txt — giống Forget-MI gốc.)
     rand_perturb = as_bool(getattr(args, 'use_noise', True))
+    # use_noise=False (P3/P6 đề xuất): tập random = D_f SẠCH HOÀN TOÀN (ảnh sạch + TEXT sạch)
+    #   → reference UU/MU = og(D_f clean), margin cũng tính từ clean. Không còn text-synonym.
+    # use_noise=True: giữ noisy (ảnh nhiễu + text synonym) — dùng cho ablation 'P3 + noise'.
+    rand_txt = noisy_txt if rand_perturb else all_txt
     # (tên_dataset, key_split, transform, txt_map, perturb_img)
     spec = [
         ('retain',     'retain',     train_trans, all_txt,   False),
@@ -418,7 +422,7 @@ def build_dataset(args, tokenizer):
         ('sel',        'sel',        eval_trans,  all_txt,   False),
         ('test_final', 'test_final', eval_trans,  all_txt,   False),
         ('forget',     'forget',     train_trans, all_txt,   False),
-        ('random',     'random',     train_trans, noisy_txt, rand_perturb),
+        ('random',     'random',     train_trans, rand_txt,  rand_perturb),
     ]
     image_noise_params = {'mean': float(getattr(args, 'noise_mean', 0.0)),
                           'std': float(getattr(args, 'noise_std', 0.1))}

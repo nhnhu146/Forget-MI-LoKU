@@ -644,16 +644,17 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
             gate_og_ret =  Gate(inp1_size = og_ret_img_emb.shape[1], inp2_size = og_ret_txt_emb.shape[1]).to(device)
             og_ret_joint_emb = gate_og_ret(og_ret_img_emb, og_ret_txt_emb)
 
-            # we use large noise therefore its minimization problem
+            # ĐÚNG PAPER: L_UU = -Dist, L_MU = -Dist — đẩy F_ul(D_f clean) RA XA F_og(D̃_f noisy).
+            # (Code gốc để +distance ở nhánh use_noise -> KÉO lại gần, sai Eq paper. Đã sửa.)
             if args.use_noise:
                 # ------------------------------------------- UU Loss -------------------------------------------
                 ul_frgt_concat_emb = torch.cat((ul_frgt_img_emb, ul_frgt_txt_emb), dim=-1)
                 og_rand_concat_emb = torch.cat((og_rand_img_emb, og_rand_txt_emb), dim=-1)
 
-                L_uu = (euclidean_distance(ul_frgt_concat_emb, og_rand_concat_emb).mean())
+                L_uu = -euclidean_distance(ul_frgt_concat_emb, og_rand_concat_emb).mean()
 
                 # ------------------------------------------- MD Loss -------------------------------------------
-                L_md = euclidean_distance(ul_frgt_joint_emb, og_rand_joint_emb).mean()
+                L_md = -euclidean_distance(ul_frgt_joint_emb, og_rand_joint_emb).mean()
             # don't use any noise, maximization problem
             else:
                 # ------------------------------------------- UU Loss -------------------------------------------
