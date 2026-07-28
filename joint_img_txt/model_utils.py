@@ -642,7 +642,9 @@ def load_image(img_path, perturb_img=False, noise_params=None):
                 
             image = image.astype(np.float32)
             image = image / np.max(image)
-            
+            if perturb_img:                                      # FIX: png/jpg cũng cộng nhiễu Gaussian
+                image = add_gaussian_noise(image, noise_params).astype(np.float32)   # (trước CHỈ nhánh .dcm)
+
         except FileNotFoundError:
             print(f"\nLỖI NGHIÊM TRỌNG: Không tìm thấy file ảnh tại: {img_path}")
             raise
