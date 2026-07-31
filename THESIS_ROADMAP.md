@@ -3,7 +3,7 @@
 > **Đề tài**: Áp dụng LoRA + Fisher Information Matrix vào Forget-MI để tinh gọn machine unlearning trong multimodal medical data
 > **Tác giả**: Nguyễn Hoàng Nhu
 > **Ngày tạo roadmap**: 2026-06-16 (cập nhật: thêm dataset Indiana University)
-> **Baseline paper**: Hardan et al., *Forget-MI: Machine Unlearning for Forgetting Multimodal Information in Healthcare Settings*, MICCAI 2024
+> **Baseline paper**: Hardan et al., *Forget-MI: Machine Unlearning for Forgetting Multimodal Information in Healthcare Settings*, MICCAI 2025
 > **Datasets**: (1) MIMIC-CXR (dataset paper gốc), (2) Indiana University Chest X-ray (cross-dataset generalization)
 
 ---
@@ -28,7 +28,7 @@
 ## 1. Mục tiêu & Luận điểm trung tâm
 
 ### 1.1 Vấn đề bạn giải quyết
-Forget-MI (MICCAI 2024) là phương pháp machine unlearning multimodal tốt nhất hiện tại cho dữ liệu y tế, NHƯNG:
+Forget-MI (MICCAI 2025) là phương pháp machine unlearning multimodal tốt nhất hiện tại cho dữ liệu y tế, NHƯNG:
 - **Mất ~5 giờ** cho mỗi lần unlearning (so với NegGrad+/SCRUB/CF-k/EU-k chỉ ~4h)
 - **Tinh chỉnh toàn bộ tham số** của model_unlearn (full fine-tune) → tốn RAM GPU
 - Khó scale lên các foundation model lớn (paper tự thừa nhận trong Conclusion)

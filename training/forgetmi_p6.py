@@ -10,7 +10,8 @@ trong mỗi nhánh:
    bottom 30%  → r = 0 (KHÔNG gắn adapter)
 GIỮ α/r = 2 (r=8→α=16, r=16→α=32) để ablation rank không lẫn cường độ LoRA
 (alpha_pattern tự suy trong build_peft). Adapter riêng ảnh/text là tự nhiên vì tên module
-tách biệt. Fusion gate: gate_mode ∈ {frozen, reg, free} (ablation phụ).
+tách biệt. Fusion gate LUÔN cố định (không train, không có ablation gate_mode nữa):
+LoKU chỉ tối ưu θ_FILA và Forget-MI không tối ưu gate.
 
 ⚠️ PEFT rank_pattern khớp bằng regex `.*\\.{key}$` — hợp cho Linear (SciBERT) nhưng có thể
 lệch với Conv2d (ResNet). Sau khi wrap, gọi verify_lora_ranks() để KIỂM CHỨNG rank thực tế
@@ -108,8 +109,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type != 'cuda' and os.environ.get('FORGETMI_ALLOW_CPU') != '1':
         raise SystemExit("Không có GPU. Bật GPU hoặc set FORGETMI_ALLOW_CPU=1.")
-    gate_mode = str(getattr(cfg, 'gate_mode', 'frozen'))
-    print(f"🟢 Device: {device}  |  METHOD={METHOD}  |  gate_mode={gate_mode}")
+    print(f"🟢 Device: {device}  |  METHOD={METHOD}  |  gate=frozen (cố định, không train)")
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
@@ -125,7 +125,7 @@ def main():
 
     desired_ranks = {}
     rank_alloc = make_rank_alloc(cfg, desired_ranks)
-    ctx = C.setup_experiment(cfg, device, rank_alloc_fn=rank_alloc, gate_mode=gate_mode)
+    ctx = C.setup_experiment(cfg, device, rank_alloc_fn=rank_alloc)
     ctx['out_dir'] = out_dir
 
     # ----- KIỂM CHỨNG rank thực tế đã áp đúng chưa -----
@@ -136,7 +136,7 @@ def main():
 
     csv_path = str(getattr(cfg, 'results_csv_path', os.path.join(out_dir, 'results_advanced.csv')))
     C.finalize_and_eval(cfg, ctx, device, METHOD, run_id, timing, best, total_steps, csv_path,
-                        extra_row={'gate_mode': gate_mode,
+                        extra_row={'gate_mode': 'frozen',
                                    'p6_n_adapters': len(desired_ranks),
                                    'p6_rank_high': int(getattr(cfg, 'p6_rank_high', 16))})
     print("✅ P6 done.")

@@ -2,9 +2,9 @@
 """
 forgetmi_main.py — PHƯƠNG PHÁP CHÍNH = P3 + P5 + P6
 ===================================================
-  P3: mục tiêu quên đa tầng CÓ CHẶN (IHL + UU_b/MU_b hinge đẩy-xa chặn trần) + UR/MR/CE/KD.
+  P3: quên đa tầng (IHL của LoKU + UU/MU = −Dist của Forget-MI) + UR/MR/CE/KD.
   P5: cân bằng quên↔giữ theo tiến trình (g_f=e^{−αq}, tổng trọng số gần hằng) + preset theo tỉ lệ.
-  P6: phân bổ rank LoRA theo Fisher chuẩn hóa riêng từng nhánh (α/r=2) + fusion gate (gate_mode).
+  P6: phân bổ rank LoRA theo Fisher chuẩn hóa riêng từng nhánh (α/r=2). Fusion gate luôn cố định.
 
 Chọn checkpoint bằng S_val trên VALIDATION (KHÔNG dùng test/retrained). Retrained chỉ để
 đánh giá HẬU NGHIỆM (1−Sim). Báo cáo cả last(E29).
@@ -55,8 +55,8 @@ def main():
 
     selector = str(getattr(cfg, 'selector', 'sval')).lower()
     select_by = 'val_ce' if selector in ('valce', 'val_ce') else 'S_val'
-    gate_mode = str(getattr(cfg, 'gate_mode', 'frozen'))
-    print(f"🟢 Device: {device}  |  METHOD={METHOD}  |  selector={select_by}  gate_mode={gate_mode}")
+    print(f"🟢 Device: {device}  |  METHOD={METHOD}  |  selector={select_by}  "
+          f"gate=frozen (cố định, không train)")
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
@@ -70,10 +70,10 @@ def main():
         if os.path.exists(cp):
             shutil.rmtree(cp)
 
-    # ----- P6: setup có phân rank theo Fisher + gate_mode -----
+    # ----- P6: setup có phân rank theo Fisher (gate luôn cố định) -----
     desired_ranks = {}
     rank_alloc = make_rank_alloc(cfg, desired_ranks)
-    ctx = C.setup_experiment(cfg, device, rank_alloc_fn=rank_alloc, gate_mode=gate_mode)
+    ctx = C.setup_experiment(cfg, device, rank_alloc_fn=rank_alloc)
     ctx['out_dir'] = out_dir
     C.verify_lora_ranks(ctx['model_unlearn'], desired_ranks)
 
@@ -85,7 +85,7 @@ def main():
 
     csv_path = str(getattr(cfg, 'results_csv_path', os.path.join(out_dir, 'results_advanced.csv')))
     C.finalize_and_eval(cfg, ctx, device, METHOD, run_id, timing, best, total_steps, csv_path,
-                        extra_row={'selector': select_by, 'gate_mode': gate_mode,
+                        extra_row={'selector': select_by, 'gate_mode': 'frozen',
                                    'p6_n_adapters': len(desired_ranks)})
     print("✅ MAIN done.")
 

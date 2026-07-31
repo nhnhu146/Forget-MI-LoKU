@@ -60,9 +60,14 @@ parameters:
   reprocess_input_data:
     value: false
   validation_ratio:
-    value: 0.1
+    value: 0.1                                               # KHÔNG còn dùng (xem test_sel_splits/retain_heldout_splits)
   random_point_ratio:
-    value: 0.1
+    value: 0.1                                               # KHÔNG còn dùng
+  # Holdout DÙNG CHUNG với P3 — giữ y hệt để hai phương pháp đánh giá trên CÙNG các mẫu.
+  test_sel_splits:
+    value: 4
+  retain_heldout_splits:
+    value: 10
   random_seed:
     value: 42
   id:
@@ -76,7 +81,10 @@ parameters:
   overwrite_output_dir:
     value: true
   use_noise:
-    value: false
+    # true = mô tả ĐÚNG thực nghiệm: tập random LUÔN là bản nhiễu (ảnh Gaussian σ=0.1 +
+    # text perturbation), UU/MU = −Dist tới bản nhiễu đó (Eq.(1)-(2)). Cờ này KHÔNG còn
+    # điều khiển gì trong code; giữ = true để config/log không nói sai thực nghiệm.
+    value: true
   learning_rate:
     value: 1.0e-5                                            # khớp MIMIC (paper validated value)
   weight_decay:

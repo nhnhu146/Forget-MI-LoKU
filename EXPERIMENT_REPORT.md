@@ -3,7 +3,7 @@
 > **Đối tượng**: Khóa luận tốt nghiệp — Machine Unlearning cho dữ liệu y tế đa phương thức
 > **Ngày cập nhật**: 2025
 > **Tác giả thực hiện**: Nguyễn Hoàng Như
-> **Mô hình tham chiếu (baseline)**: Forget-MI (Hardan et al., MICCAI 2024)
+> **Mô hình tham chiếu (baseline)**: Forget-MI (Hardan et al., MICCAI 2025)
 
 ---
 

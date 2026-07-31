@@ -12,11 +12,24 @@ pháp mới (``forgetmi_p3/p4/p5/p6/main.py``) import từ đây để bảo đ�
 Protocol chốt (xem trao đổi thiết kế):
   - 30 epoch (ngân sách của Forget-MI, KHÔNG phải "30 epoch kiểu LoKU"); LoKU
     dùng ngân sách/tiêu chí dừng khác giữa TDEC và TOFU.
-  - per-batch optimizer step; báo cáo thêm total_optimizer_steps + runtime
-    (cùng epoch ≠ cùng số lần cập nhật).
+  - cadence cập nhật theo code gốc Forget-MI: gradient TÍCH LŨY qua các batch trong
+    epoch, optimizer.step() MỘT lần ở cuối epoch → total_optimizer_steps = số epoch.
   - evaluate_last_and_best: 'selected' (chọn bằng validation) = kết quả chính,
     'last' (E29) = phân tích ổn định / over-forget.
   - use_noise=true (μ=0, σ=0.1): tham chiếu og_rnd là bản NHIỄU thật sự.
+
+BÁM SÁT HAI BÀI GỐC (không được lệch):
+  - Forget-MI Eq.(1)-(2): L_UU = −Dist([F_ul(I_f),F_ul(T_f)], [F_og(Ĩ_f),F_og(T̃_f)]),
+    L_MU = −Dist(F_ul((I_f,T_f)), F_og((Ĩ_f,T̃_f))) — DẤU ÂM của khoảng cách Euclid tới
+    bản NHIỄU, KHÔNG dùng hinge có chặn / margin.
+  - Forget-MI Eq.(3)-(4): L_UR, L_MR = khoảng cách Euclid trên D_r, KHÔNG cap min(d,m),
+    KHÔNG margin, KHÔNG "lực kéo nhẹ".
+  - LoKU Eq.(2): empirical Fisher = trung bình BÌNH PHƯƠNG GRADIENT TỪNG MẪU.
+  - LoKU Sec.3.4: F_rel = F_f/(F_r+ε); trọng số hàng = sqrt(row-wise SUM) (không phải mean);
+    W* = W − B*A*.
+  - LoKU Sec.3.5: CHỈ θ_FILA (LoRA A,B) được tối ưu → classifier heads đóng băng.
+  - Fusion gate: paper Forget-MI KHÔNG quy định gate dùng chung hay riêng, train hay eval
+    → theo CODE GỐC: tạo mới mỗi batch, riêng từng vai trò, train mode, KHÔNG vào optimizer.
 
 Holdout cố định (seed cố định, chung cho mọi phương pháp):
   D_f            : tập cần quên (subject trong forget_set_*.csv)
@@ -30,9 +43,13 @@ Holdout cố định (seed cố định, chung cho mọi phương pháp):
       test_final   : 75% → CHỈ báo cáo cuối (MIA/AUC/F1...)
   random         : bản nhiễu của D_f (ảnh Gaussian σ + text synonym)
 
-Selector S_val (dùng CHUNG cho P3–P6 và main, chọn nhỏ nhất):
+Selector S_val (PROTOCOL RIÊNG CỦA LUẬN VĂN — không phải thành phần của Forget-MI hay
+LoKU; dùng CHUNG cho P3–P6 và main, chọn nhỏ nhất):
   S_val = w_f·G_forget + w_p·G_privacy + w_u·G_utility ,   mỗi G ∈ [0,1]
-  G_forget  = ⅓(IHL/2 + UU_b/(m_u+ε) + MU_b/(m_m+ε))   (đánh giá trên D_f, no-grad)
+  G_forget  = ⅓(IHL/2 + d⁰_u/(d_u+d⁰_u) + d⁰_m/(d_m+d⁰_m))   (đánh giá trên D_f, no-grad)
+      d_u,d_m = khoảng cách Euclid đơn/đa phương thức tới tham chiếu og(nhiễu);
+      d⁰_u,d⁰_m = CHUẨN HÓA tham chiếu đo tại epoch 0 (chỉ để đưa G về [0,1] cho
+      selector — KHÔNG phải margin, KHÔNG xuất hiện trong hàm mất mát).
   G_privacy = MIA_val  (SVM member=D_r_attack, non-member=D_nm_val, đoán D_f; nhánh ảnh)
   G_utility = ½[clip(g_A,0,1)+clip(g_F,0,1)],  g_A=max(0,AUC_og−AUC_ul−δ_A)/(1−δ_A)
   → 0 là tốt nhất ở cả ba thành phần.
@@ -406,14 +423,11 @@ def build_dataset(args, tokenizer):
     train_trans = RandomTranslateCrop(2048)
     eval_trans = CenterCrop(2048)
 
-    # use_noise điều khiển việc ẢNH của tập random có bị nhiễu Gaussian hay không:
-    #   use_noise=true  → og_rnd = og(ảnh nhiễu σ + text synonym)  [setting CHÍNH, faithful Forget-MI]
-    #   use_noise=false → og_rnd = og(ảnh SẠCH + text synonym)     [ABLATION riêng]
-    # (text luôn nhiễu vì tập random dùng noisy_txt — giống Forget-MI gốc.)
+    # use_noise: tập 'random' là BẢN NHIỄU (Ĩ_f, T̃_f) của D_f dùng làm THAM CHIẾU cho UU/MU.
+    #   use_noise=true  → og_rnd = og(ảnh nhiễu Gaussian σ + text perturbation)
+    #                     [SETTING CHÍNH — đúng Forget-MI Eq.(1)-(2), mặc định]
+    #   use_noise=false → og_rnd = og(D_f SẠCH hoàn toàn)   [chỉ dùng cho ABLATION 'no_noise']
     rand_perturb = as_bool(getattr(args, 'use_noise', True))
-    # use_noise=False (P3/P6 đề xuất): tập random = D_f SẠCH HOÀN TOÀN (ảnh sạch + TEXT sạch)
-    #   → reference UU/MU = og(D_f clean), margin cũng tính từ clean. Không còn text-synonym.
-    # use_noise=True: giữ noisy (ảnh nhiễu + text synonym) — dùng cho ablation 'P3 + noise'.
     rand_txt = noisy_txt if rand_perturb else all_txt
     # (tên_dataset, key_split, transform, txt_map, perturb_img)
     spec = [
@@ -459,45 +473,77 @@ def build_dataset(args, tokenizer):
 
 def compute_fisher_importance(model, dataloader, device, target_modules, args,
                               max_samples=256):
-    """Fisher ≈ E[(∂ log p(y|x)/∂θ)²] dùng CE ở img_logits + txt_logits (true labels)."""
+    """Empirical Fisher ĐÚNG LoKU Eq.(2) — trung bình BÌNH PHƯƠNG GRADIENT TỪNG MẪU:
+
+        F̂ = (1/N) · Σ_{i=1..N} ( ∂ℓ_i/∂θ )² ,   ℓ_i = CE_img,i + CE_txt,i
+
+    (KHÔNG phải ( ∂/∂θ mean_i ℓ_i )² như bản cũ — bình phương của gradient trung bình
+    batch làm mất phương sai giữa các mẫu và KHÔNG phải Fisher. Cũng KHÔNG dùng mẹo
+    fisher_batch_size=1 để lách công thức: forward vẫn theo batch, chỉ gradient là
+    per-sample qua autograd.grad trên đồ thị dùng chung.)"""
     model.eval()
-    importance = {
-        name: torch.zeros_like(p.data)
-        for name, p in model.named_parameters()
-        if any(tm in name for tm in target_modules) and 'weight' in name
-    }
+    params = {name: p for name, p in model.named_parameters()
+              if any(tm in name for tm in target_modules) and 'weight' in name and p.requires_grad}
+    names = list(params.keys())
+    plist = [params[n] for n in names]
+    importance = {name: torch.zeros_like(params[name].data) for name in names}
+    if not names:
+        print("⚠️  Không có tham số mục tiêu cho Fisher. Trả zeros.")
+        return importance
     n = 0
-    for batch in tqdm(dataloader, desc="Fisher"):
+    for batch in tqdm(dataloader, desc="Fisher(per-sample)"):
         if n >= max_samples:
             break
         inputs, labels, _ = get_model_inputs(args, batch, device)
         labels = labels.long().view(-1)
-        model.zero_grad()
         outputs = model(**inputs)
-        loss = F.cross_entropy(outputs[1], labels) + F.cross_entropy(outputs[3], labels)
-        loss.backward()
-        for name, p in model.named_parameters():
-            if name in importance and p.grad is not None:
-                importance[name] += p.grad.data.pow(2)
-        n += batch[0].size(0)
+        img_logits, txt_logits = outputs[1], outputs[3]
+        bs = int(batch[0].size(0))
+        for i in range(bs):
+            if n >= max_samples:
+                break
+            # ℓ_i của RIÊNG mẫu i (không lấy trung bình batch)
+            loss_i = (F.cross_entropy(img_logits[i:i + 1], labels[i:i + 1])
+                      + F.cross_entropy(txt_logits[i:i + 1], labels[i:i + 1]))
+            grads = torch.autograd.grad(loss_i, plist, retain_graph=(i < bs - 1),
+                                        allow_unused=True)
+            for name, g in zip(names, grads):
+                if g is not None:
+                    importance[name] += g.detach().pow(2)
+            n += 1
+        del outputs, img_logits, txt_logits
     if n == 0:
         print("⚠️  Không có sample cho Fisher. Trả zeros.")
         return importance
+    print(f"   Fisher: {n} mẫu (gradient per-sample, F̂ = Σ g_i²/N)")
     return {k: v / n for k, v in importance.items()}
 
 
-def _fila_decompose(W2d, rel2d, r, target_r):
-    """Phân rã low-rank có trọng số Fisher (FILA). Trả (A_pad, B_pad, sub2d).
-    target_r = số slot rank PEFT cấp; effective rank clamp cho ma trận nhỏ."""
+def _fila_decompose(W2d, rel2d, r, target_r, peft_scaling=1.0):
+    """Phân rã low-rank có trọng số Fisher theo hàng (row-wise WLRA của LoKU Sec. 3.4).
+    Trả (A_pad, B_pad, sub2d). target_r = số slot rank PEFT cấp; effective rank clamp
+    cho ma trận nhỏ.
+
+    Trọng số hàng ĐÚNG LoKU: s_i = sqrt( Σ_j F_rel[i,j] )  ("square-root of the row-wise
+    SUM of F_rel"). Bản cũ dùng mean(dim=1) → sai hệ số 1/√(in_dim) và làm phẳng chênh
+    lệch giữa các hàng khi in_dim khác nhau.
+
+    CHIA S CHO peft_scaling (=α/r) TRƯỚC khi khai căn — đúng `S = S / scaling['default']`
+    của code gốc LoKU (TOFU/forget.py:279). PEFT nhân α/r vào nhánh LoRA lúc forward, nên
+    nếu để nguyên S thì thành phần thực sự đưa vào adapter là (α/r)·B*A* chứ không phải
+    B*A*. Sau khi chia:
+        peft_scaling · (B_raw @ A_raw) = B*A* = ΔW_FILA
+    tức đúng lượng mà paper ký hiệu B*A*, không bị nhân dư α/r."""
     out_dim, in_dim = W2d.shape
-    row_imp = rel2d.mean(dim=1).sqrt() + 1e-6
+    row_imp = rel2d.sum(dim=1).sqrt() + 1e-6
     Wp = row_imp[:, None] * W2d
     r_eff = max(1, min(r, min(out_dim, in_dim) - 1))
     U, S, V = torch.svd_lowrank(Wp, q=r_eff)
+    S = S / max(float(peft_scaling), 1e-12)          # <-- bước của code gốc LoKU
     S_sqrt = torch.sqrt(S + 1e-8)
     A_raw = (V * S_sqrt).t()
     B_raw = (U * S_sqrt) / (row_imp[:, None] + 1e-6)
-    sub2d = B_raw @ A_raw
+    sub2d = B_raw @ A_raw                            # = ΔW_FILA / peft_scaling
     A_pad = W2d.new_zeros(target_r, in_dim);  A_pad[:r_eff] = A_raw
     B_pad = W2d.new_zeros(out_dim, target_r); B_pad[:, :r_eff] = B_raw
     return A_pad, B_pad, sub2d
@@ -513,8 +559,13 @@ def apply_loku_soft_init(model, forget_imp, retain_imp, target_modules,
 
     rank_pattern (P6): dict {substring_tên_module: rank_hiệu_dụng}. Với mỗi lớp, dùng
     rank khớp pattern (mặc định = r). Rank hiệu dụng chỉ ảnh hưởng phân rã FILA;
-    số slot thực do PEFT cấp (lora_A.shape[0]) — nếu lệch thì clamp về target_r."""
+    số slot thực do PEFT cấp (lora_A.shape[0]) — nếu lệch thì clamp về target_r.
+
+    TRẢ VỀ: fila_subtraction = {module_path: tensor B*A* đã trừ khỏi base} (CPU).
+    Cần cho việc dựng lại checkpoint 'selected' ĐÚNG reparameterization W* = W − B*A*
+    (nếu dựng lại từ pretrained mà không trừ bù thì base sai → checkpoint vô nghĩa)."""
     matched, skipped = 0, 0
+    fila_subtraction = {}
     image_set = set(image_target_names) if image_target_names else set()
 
     def _rank_for(path):
@@ -553,16 +604,21 @@ def apply_loku_soft_init(model, forget_imp, retain_imp, target_modules,
             W2d, rel2d = W, rel
 
         try:
-            A_pad, B_pad, sub2d = _fila_decompose(W2d, rel2d, r_layer, target_r)
+            A_pad, B_pad, sub2d = _fila_decompose(W2d, rel2d, r_layer, target_r,
+                                                  peft_scaling=peft_scaling)
         except Exception:
             skipped += 1
             continue
 
         if scale > 0:
+            # sub2d = ΔW_FILA/(α/r) ⇒ phần trừ = peft_scaling·sub2d·γ = γ·B*A* (đúng LoKU:
+            # new_residual = W − scaling · B @ A), không còn dư hệ số α/r.
             subtraction = sub2d * peft_scaling * scale
             if is_conv:
                 subtraction = subtraction.reshape(out_dim, in_dim, kh, kw)
-            base.weight.data -= subtraction.to(base.weight.dtype)
+            subtraction = subtraction.to(base.weight.dtype)
+            base.weight.data -= subtraction
+            fila_subtraction[path] = subtraction.detach().cpu().clone()
             sq = scale ** 0.5
             A_set, B_set = A_pad * sq, B_pad * sq
         else:
@@ -579,24 +635,51 @@ def apply_loku_soft_init(model, forget_imp, retain_imp, target_modules,
         if (subtract_scale > 0 or (image_subtract_scale or 0) > 0) else f"soft({init_scale})"
     print(f"✅ FILA init [{mode}] áp dụng {matched} lớp ({skipped} bỏ qua)"
           + (f" | rank_pattern={rank_pattern}" if rank_pattern else ""))
+    if fila_subtraction:
+        nb = sum(t.numel() * t.element_size() for t in fila_subtraction.values()) / 1e6
+        print(f"   💾 lưu FILA subtraction cho {len(fila_subtraction)} lớp ({nb:.0f} MB CPU) "
+              f"→ dựng lại checkpoint 'selected' vẫn giữ W* = W − B*A*")
+    return fila_subtraction
+
+
+def apply_fila_subtraction(model, fila_subtraction):
+    """Áp lại phép trừ bù W* = W − B*A* lên model vừa dựng từ pretrained (đã bọc PEFT),
+    TRƯỚC khi nạp state LoRA đã học. Không có bước này thì base là W chứ không phải W*,
+    tức checkpoint 'selected' không còn đúng reparameterization của LoKU."""
+    applied, missing = 0, 0
+    for path, sub in fila_subtraction.items():
+        try:
+            base = get_module(model, path).base_layer
+        except (AttributeError, KeyError):
+            missing += 1
+            continue
+        base.weight.data -= sub.to(base.weight.device, base.weight.dtype)
+        applied += 1
+    print(f"♻️  Khôi phục FILA subtraction: {applied} lớp"
+          + (f" ({missing} lớp KHÔNG khớp — cảnh báo!)" if missing else ""))
+    return applied
 
 
 # ============================================================================
-# Margin quantile 0.90 (đo per-sample tại epoch 0)
+# Thang chuẩn hóa d⁰ tại epoch 0 — CHỈ dùng cho selector S_val của luận văn
+# (KHÔNG phải margin; hàm mất mát UU/MU/UR/MR không dùng biên — xem Forget-MI Eq.(1)-(4))
 # ============================================================================
 
 @torch.no_grad()
-def compute_epoch0_margins(model_ul, model_og, gates, forget_dl, rand_dl, args, device,
-                           quantile=0.90, max_batches=None):
-    """Thu TOÀN BỘ khoảng cách theo TỪNG MẪU tại epoch 0 rồi đặt
-      m_u = Q_q({d_u,i}),  m_m = Q_q({d_m,i}).
-    d_u = ||[F_ul_img,F_ul_txt](D_f) − [F_og_img,F_og_txt](noisy)||  (đơn phương thức concat)
-    d_m = ||gate_ul(D_f) − gate_og(noisy)||                          (kết hợp)
-    Vì Euclid phụ thuộc số chiều/thang đo embedding → quantile ổn định hơn hằng số."""
-    # KHỚP HỆT regime của loss lúc train: model_ul.train() (dropout BẬT) nhưng BN giữ eval.
-    # (Trước đây eval() làm BN+dropout khác train → margin lệch loss → UU/MU=0.) og luôn eval.
+def compute_epoch0_scales(model_ul, model_og, forget_dl, rand_dl, args, device,
+                          max_batches=None):
+    """Đo khoảng cách TRUNG BÌNH tại epoch 0 (trước khi unlearning) làm THANG CHUẨN HÓA
+    cho G_forget của selector S_val:
+      d⁰_u = mean_i ||[F_ul_img,F_ul_txt](D_f) − [F_og_img,F_og_txt](nhiễu)||
+      d⁰_m = mean_i ||gate(F_ul(D_f)) − gate(F_og(nhiễu))||
+    Vì Euclid phụ thuộc số chiều/thang đo embedding, cần một mốc quy chiếu để đưa
+    G_forget về [0,1]. ĐÂY KHÔNG PHẢI MARGIN: không có hằng số này trong loss, loss dùng
+    đúng −Dist của Forget-MI.
+
+    Gate được tạo MỚI theo từng batch (như code gốc Forget-MI), nên d⁰_m có thành phần
+    ngẫu nhiên của phép hợp nhất; lấy trung bình trên toàn tập D_f để ổn định."""
+    # Cùng regime với lúc train: model_ul.train() nhưng BN giữ eval.
     model_ul.train(); set_bn_eval(model_ul); model_og.eval()
-    for g in gates.values(): g.train()
     du_all, dm_all = [], []
     it = zip(forget_dl, rand_dl)
     for bi, (fb, rb) in enumerate(it):
@@ -612,23 +695,19 @@ def compute_epoch0_margins(model_ul, model_og, gates, forget_dl, rand_dl, args, 
         ul_c = torch.cat((ul_i, ul_t), dim=-1)
         og_c = torch.cat((og_i, og_t), dim=-1)
         du_all.append(euclidean_distance(ul_c, og_c).cpu().numpy())
-        ul_j = gates['ul_frg'](ul_i, ul_t)
-        og_j = gates['og_rnd'](og_i, og_t)
+        # Gate MỚI theo batch, riêng từng vai trò — như code gốc Forget-MI
+        g = new_batch_gates(ul_i.shape[1], ul_t.shape[1], device, roles=('ul_frg', 'og_rnd'))
+        ul_j = g['ul_frg'](ul_i, ul_t)
+        og_j = g['og_rnd'](og_i, og_t)
         dm_all.append(euclidean_distance(ul_j, og_j).cpu().numpy())
     du = np.concatenate(du_all) if du_all else np.array([1.0])
     dm = np.concatenate(dm_all) if dm_all else np.array([1.0])
-    m_u = float(np.quantile(du, quantile))
-    m_m = float(np.quantile(dm, quantile))
-    # active-rate tại margin-time (theo định nghĩa Q_q ⇒ ~q) — kiểm tra quantile không hỏng.
-    act_u = float((du < m_u).mean()); act_m = float((dm < m_m).mean())
-    print(f"📏 Margin quantile {quantile:.2f}: m_u={m_u:.4f} (d_u∈[{du.min():.3f},{du.max():.3f}] "
-          f"active={act_u:.2f})  m_m={m_m:.4f} (d_m∈[{dm.min():.3f},{dm.max():.3f}] active={act_m:.2f})")
-    lo, hi = quantile - 0.15, min(0.99, quantile + 0.08)
-    if not (lo <= act_u <= hi and lo <= act_m <= hi):
-        raise RuntimeError(
-            f"Margin/loss KHÔNG đồng nhất: active_uu={act_u:.2f} active_mu={act_m:.2f} "
-            f"(kỳ vọng ~{quantile:.2f}). d_u/d_m gần như hằng số hoặc lỗi tính margin.")
-    return m_u, m_m
+    d_u0 = max(float(du.mean()), 1e-6)
+    d_m0 = max(float(dm.mean()), 1e-6)
+    print(f"📏 Thang chuẩn hóa selector tại epoch 0: d⁰_u={d_u0:.4f} "
+          f"(d_u∈[{du.min():.3f},{du.max():.3f}])  d⁰_m={d_m0:.4f} "
+          f"(d_m∈[{dm.min():.3f},{dm.max():.3f}])")
+    return d_u0, d_m0
 
 
 # ============================================================================
@@ -779,15 +858,13 @@ def perf_metrics(model, dataset, device, args, batch_size=32, num_classes=4):
 # ============================================================================
 
 @torch.no_grad()
-def eval_forget_losses(model_ul, model_og, gates, forget_dl, rand_dl, margins, args, device,
-                       ihl_margin=None):
-    """Đánh giá IHL, UU_b, MU_b trên D_f (KHÔNG backprop) — cho G_forget của selector.
-    P4 dù tắt loss quên ở GĐ2 vẫn gọi hàm này để bắt 'nhớ lại'. Dạng hinge đẩy-xa
-    chặn TRẦN (nguyên văn P3): UU_b=ReLU(m_u−d_u), MU_b=ReLU(m_m−d_m)."""
-    m_u, m_m = margins
+def eval_forget_losses(model_ul, model_og, forget_dl, rand_dl, args, device):
+    """Đánh giá IHL và các KHOẢNG CÁCH quên d_u, d_m trên D_f (KHÔNG backprop) — cho
+    G_forget của selector. P4 dù tắt loss quên ở GĐ2 vẫn gọi hàm này để bắt 'nhớ lại'.
+    d_u/d_m là khoảng cách Euclid tới tham chiếu og(nhiễu) đúng Forget-MI Eq.(1)-(2);
+    không có hinge/margin ở đây nữa. Gate tạo mới theo batch (như code gốc Forget-MI)."""
     model_ul.eval(); model_og.eval()
-    for g in gates.values(): g.eval()
-    ihl_s, uu_s, mu_s, n = 0.0, 0.0, 0.0, 0
+    ihl_s, du_s, dm_s, n = 0.0, 0.0, 0.0, 0
     for fb, rb in zip(forget_dl, rand_dl):
         f_in, f_lbl, _ = get_model_inputs(args, fb, device)
         rnd_in, _, _ = get_model_inputs(args, rb, device)
@@ -799,23 +876,29 @@ def eval_forget_losses(model_ul, model_og, gates, forget_dl, rand_dl, margins, a
             og_i, _, og_t, _ = safe_forward(model_og, rnd_in)[:4]
         ul_i = ul_i.float(); ul_t = ul_t.float(); og_i = og_i.float(); og_t = og_t.float()
         ul_il = ul_il.float(); ul_tl = ul_tl.float()
-        # UU_b / MU_b PER-SAMPLE (đồng nhất forget_hinge lúc train)
-        ul_j = gates['ul_frg'](ul_i, ul_t); og_j = gates['og_rnd'](og_i, og_t)
-        uu_b, mu_b, _ = forget_hinge(ul_i, ul_t, ul_j, og_i, og_t, og_j, (m_u, m_m))
+        g = new_batch_gates(ul_i.shape[1], ul_t.shape[1], device, roles=('ul_frg', 'og_rnd'))
+        ul_j = g['ul_frg'](ul_i, ul_t); og_j = g['og_rnd'](og_i, og_t)
+        _, _, st = forget_distance(ul_i, ul_t, ul_j, og_i, og_t, og_j)
         # IHL = 1 + p(true) − max_{v≠true} p(v)  (bounded [0,2])
         f_y = f_lbl.long().view(-1)
         ihl = inverted_hinge_loss(ul_il, ul_tl, f_y)
         bs = fb[0].size(0)
-        ihl_s += float(ihl) * bs; uu_s += float(uu_b) * bs; mu_s += float(mu_b) * bs; n += bs
+        ihl_s += float(ihl) * bs
+        du_s += st['d_u_mean'] * bs; dm_s += st['d_m_mean'] * bs; n += bs
     n = max(n, 1)
-    return {'ihl': ihl_s / n, 'uu_b': uu_s / n, 'mu_b': mu_s / n}
+    return {'ihl': ihl_s / n, 'd_u': du_s / n, 'd_m': dm_s / n}
 
 
-def compute_S_val(forget_losses, mia_val, ul_perf, og_perf, margins, weights, deltas):
+def compute_S_val(forget_losses, mia_val, ul_perf, og_perf, ref_scales, weights, deltas):
     """S_val = w_f·G_forget + w_p·G_privacy + w_u·G_utility (mỗi G∈[0,1], nhỏ=tốt).
-    forget_losses: {ihl,uu_b,mu_b}; mia_val∈[0,1]; *_perf: {AUC,Macro_F1};
-    margins=(m_u,m_m); weights=(w_f,w_p,w_u); deltas=(δ_A,δ_F)."""
-    m_u, m_m = margins; w_f, w_p, w_u = weights; d_A, d_F = deltas
+    forget_losses: {ihl,d_u,d_m}; mia_val∈[0,1]; *_perf: {AUC,Macro_F1};
+    ref_scales=(d⁰_u,d⁰_m) đo tại epoch 0; weights=(w_f,w_p,w_u); deltas=(δ_A,δ_F).
+
+    G_forget dùng ánh xạ giảm-đơn-điệu, bị chặn trong (0,1]:
+        ĝ(d) = d⁰/(d + d⁰)   → d=0 ⇒ 1 (chưa quên, tệ nhất); d=d⁰ ⇒ 0.5; d→∞ ⇒ 0.
+    d⁰ CHỈ là hằng số chuẩn hóa của selector (protocol luận văn), KHÔNG phải margin và
+    KHÔNG có mặt trong hàm mất mát."""
+    d_u0, d_m0 = ref_scales; w_f, w_p, w_u = weights; d_A, d_F = deltas
     eps = 1e-6
 
     def _safe01(x):
@@ -826,8 +909,8 @@ def compute_S_val(forget_losses, mia_val, ul_perf, og_perf, margins, weights, de
         return float(np.clip(x, 0.0, 1.0))
 
     g_forget = (1.0 / 3.0) * (forget_losses['ihl'] / 2.0
-                              + forget_losses['uu_b'] / (m_u + eps)
-                              + forget_losses['mu_b'] / (m_m + eps))
+                              + d_u0 / (forget_losses['d_u'] + d_u0 + eps)
+                              + d_m0 / (forget_losses['d_m'] + d_m0 + eps))
     g_forget = _safe01(g_forget)
     g_privacy = _safe01(mia_val)
     g_A = max(0.0, og_perf['AUC'] - ul_perf['AUC'] - d_A) / max(1e-6, 1.0 - d_A)
@@ -855,51 +938,39 @@ def inverted_hinge_loss(img_logits, txt_logits, y):
     return 0.5 * (_one(img_logits) + _one(txt_logits))
 
 
-def forget_hinge(ul_i, ul_t, ul_j, og_i, og_t, og_j, margins):
-    """Hinge FORGET đẩy-xa chặn TRẦN, tính PER-SAMPLE (ĐỒNG NHẤT với margin quantile
-    per-sample — KHÔNG lấy mean batch trước rồi mới hinge):
-        L_UU_b = mean_i ReLU(m_u − d_u,i) ,  L_MU_b = mean_i ReLU(m_m − d_m,i)
-    Vì m = Q_0.90 của {d_i^(0)} → ~90% mẫu có d_i<m lúc bắt đầu ⇒ UU/MU kích hoạt.
-    (Bản cũ hinge trên mean → gần như luôn 0 do mean nằm ở ~phân vị 50 và tụt qua m ngay.)
-    Trả (L_uu, L_mu, stats={d_u_mean,d_m_mean,uu_active,mu_active})."""
-    m_u, m_m = margins
+def forget_distance(ul_i, ul_t, ul_j, og_i, og_t, og_j):
+    """QUÊN biểu diễn — ĐÚNG Forget-MI Eq.(1)-(2): ÂM của khoảng cách Euclid tới biểu
+    diễn mà mô hình GỐC tạo ra trên BẢN NHIỄU (Ĩ_f, T̃_f):
+
+        L_UU = − mean_i || [z^img_ul, z^txt_ul](I_f,T_f) − [z^img_og, z^txt_og](Ĩ_f,T̃_f) ||
+        L_MU = − mean_i || z^joint_ul(I_f,T_f) − z^joint_og(Ĩ_f,T̃_f) ||
+
+    KHÔNG dùng hinge có chặn ReLU(m−d) và KHÔNG có margin: bài gốc tối thiểu hóa −d,
+    tức càng xa càng tốt (việc kiểm soát quên quá đà nằm ở các thành phần giữ lại và ở
+    bước chọn checkpoint, không nằm trong định nghĩa của L_UU/L_MU).
+    Trả (L_uu, L_mu, stats={d_u_mean,d_m_mean})."""
     d_u = euclidean_distance(torch.cat((ul_i, ul_t), -1), torch.cat((og_i, og_t), -1))  # [N]
     d_m = euclidean_distance(ul_j, og_j)                                                 # [N]
-    L_uu = F.relu(m_u - d_u).mean()
-    L_mu = F.relu(m_m - d_m).mean()
+    L_uu = -d_u.mean()
+    L_mu = -d_m.mean()
     with torch.no_grad():
-        stats = {'d_u_mean': float(d_u.mean()), 'd_m_mean': float(d_m.mean()),
-                 'uu_active': float((d_u < m_u).float().mean()),
-                 'mu_active': float((d_m < m_m).float().mean())}
+        stats = {'d_u_mean': float(d_u.mean()), 'd_m_mean': float(d_m.mean())}
     return L_uu, L_mu, stats
 
 
-def _gate_reg_loss(ctx, cfg):
-    """Phạt lệch khỏi gate gốc (gate_mode='reg', dùng cho P6)."""
-    if ctx.get('gate_mode') != 'reg' or 'gate_init' not in ctx:
-        return None
-    lam = float(getattr(cfg, 'lambda_gate_reg', 0.1))
-    reg = None
-    for n, g in ctx['gates'].items():
-        init = ctx['gate_init'][n]
-        for pname, p in g.named_parameters():
-            if p.requires_grad and pname in init:
-                term = ((p - init[pname].to(p.device)) ** 2).sum()
-                reg = term if reg is None else reg + term
-    return None if reg is None else lam * reg
-
-
-def combined_batch_loss(cfg, ctx, fb, rb, retb, device, retain_margins, weights,
+def combined_batch_loss(cfg, ctx, fb, rb, retb, device, weights,
                         forget_active=True, guard_ihl=0.0):
     """LÕI mất mát dùng chung cho P3 / P4-GĐ1 / P5 / main.
-      forget_active=True  → đủ: λ_UR·UR + λ_MR·MR + λ_UU·UU_b + λ_MU·MU_b + λ_CE·CE + λ_KD·KD + λ_IHL·IHL
+      forget_active=True  → đủ: λ_UR·UR + λ_MR·MR + λ_UU·UU + λ_MU·MU + λ_CE·CE + λ_KD·KD + λ_IHL·IHL
       forget_active=False → chỉ giữ (P4-GĐ2): UR + MR + CE + KD (+ guard_ihl·IHL nếu có fb)
-    weights=(λ_UR,λ_UU,λ_MU,λ_MR,λ_CE,λ_KD,λ_IHL). retain_margins={'ur','mr'} (calibrate batch đầu).
-    Hinge FORGET = ĐẨY-XA chặn TRẦN: UU_b=ReLU(m_u−d_u), MU_b=ReLU(m_m−d_m).
-    RETAIN = giữ gần og, hinge Forget-MI cap min(d,margin). KD teacher=og (honest)."""
+    weights=(λ_UR,λ_UU,λ_MU,λ_MR,λ_CE,λ_KD,λ_IHL).
+
+    QUÊN (Forget-MI Eq.(1)-(2)): UU = −d_u, MU = −d_m tới tham chiếu og(nhiễu).
+    GIỮ (Forget-MI Eq.(3)-(4)): UR = mean d_ur, MR = mean d_mr — khoảng cách Euclid THUẦN,
+      KHÔNG cap min(d,m), KHÔNG margin, KHÔNG lực kéo nhẹ.
+    KD teacher=og (honest). Fusion gate: TẠO MỚI theo từng batch, riêng từng vai trò,
+    không nằm trong optimizer — bám cấu trúc triển khai của code gốc Forget-MI."""
     lam_ur, lam_uu, lam_mu, lam_mr, lam_ce, lam_kd, lam_ihl = weights
-    m_u, m_m = ctx['margins']
-    gates = ctx['gates']
     model_ul = ctx['model_unlearn']; model_og = ctx['model_og']
 
     ret_in, ret_lbl, _ = get_model_inputs(cfg, retb, device)
@@ -909,18 +980,18 @@ def combined_batch_loss(cfg, ctx, fb, rb, retb, device, retain_margins, weights,
     og_ret_il = og_ret_il.float(); og_ret_tl = og_ret_tl.float()
 
     ul_ret_i, ul_ret_il, ul_ret_t, ul_ret_tl = model_ul(**ret_in)[:4]
+    gates = new_batch_gates(ul_ret_i.shape[1], ul_ret_t.shape[1], device)
     ul_ret_j = gates['ul_ret'](ul_ret_i, ul_ret_t)
     og_ret_j = gates['og_ret'](og_ret_i, og_ret_t)
 
-    # ----- RETAIN repr: giữ gần og (hinge Forget-MI: cap min(d, margin)) -----
-    d_ur = euclidean_distance(torch.cat((ul_ret_i, ul_ret_t), -1),
+    # ----- RETAIN repr (Forget-MI Eq.(3)-(4)): khoảng cách Euclid THUẦN, không cap -----
+    #   L_UR = Dist([F_ul(I_r),F_ul(T_r)], [F_og(I_r),F_og(T_r)])
+    #   L_MR = Dist(F_ul((I_r,T_r)), F_og((I_r,T_r)))
+    # Bản cũ dùng torch.minimum(d, margin) → gradient = 0 khi d vượt margin, tức càng lệch
+    # xa mô hình gốc thì lực giữ càng biến mất (ngược hẳn ý nghĩa retention của bài gốc).
+    L_ur = euclidean_distance(torch.cat((ul_ret_i, ul_ret_t), -1),
                               torch.cat((og_ret_i, og_ret_t), -1)).mean()
-    d_mr = euclidean_distance(ul_ret_j, og_ret_j).mean()
-    if retain_margins.get('ur') is None:
-        retain_margins['ur'] = (d_ur + 1.0).detach()
-        retain_margins['mr'] = (d_mr + 1.0).detach()
-    L_ur = torch.minimum(d_ur, retain_margins['ur'])
-    L_mr = torch.minimum(d_mr, retain_margins['mr'])
+    L_mr = euclidean_distance(ul_ret_j, og_ret_j).mean()
 
     # ----- CE + KD trên retain -----
     ret_y = ret_lbl.long().view(-1)
@@ -951,9 +1022,8 @@ def combined_batch_loss(cfg, ctx, fb, rb, retb, device, retain_margins, weights,
         L_ihl = inverted_hinge_loss(ul_frg_il, ul_frg_tl, f_y)
         comp['IHL'] = L_ihl.item()
         if forget_active:
-            L_uu, L_mu, hstats = forget_hinge(ul_frg_i, ul_frg_t, ul_frg_j,
-                                              og_rnd_i, og_rnd_t, og_rnd_j, (m_u, m_m))
-            comp['uu_active'] = hstats['uu_active']; comp['mu_active'] = hstats['mu_active']
+            L_uu, L_mu, hstats = forget_distance(ul_frg_i, ul_frg_t, ul_frg_j,
+                                                 og_rnd_i, og_rnd_t, og_rnd_j)
             comp['d_u_mean'] = hstats['d_u_mean']; comp['d_m_mean'] = hstats['d_m_mean']
             # ABLATION 'A': ablate_uu_mu=true → KHÔNG cộng UU/MU vào loss (vẫn log để đối chiếu).
             # Chặn ở TẦNG LOSS vì P5/main lấy trọng số từ preset, KHÔNG đọc lambda_uu/lambda_mu
@@ -967,10 +1037,6 @@ def combined_batch_loss(cfg, ctx, fb, rb, retb, device, retain_margins, weights,
         else:
             loss = loss + guard_ihl * L_ihl        # P4-GĐ2: guard nhỏ
 
-    L_gate = _gate_reg_loss(ctx, cfg)
-    if L_gate is not None:
-        loss = loss + L_gate
-        comp['GateReg'] = float(L_gate.item())
     comp['Total'] = loss.item()
     return loss, comp
 
@@ -980,31 +1046,49 @@ def combined_batch_loss(cfg, ctx, fb, rb, retb, device, retain_margins, weights,
 # ============================================================================
 
 class WarmupThenPlateau:
-    """Warmup tuyến tính theo GLOBAL STEP trong warmup_steps đầu; sau đó
+    """Warmup tuyến tính trong warmup_steps lần CẬP NHẬT đầu; sau đó
     ReduceLROnPlateau step MỘT LẦN mỗi epoch theo S_val (mode='min').
-    KHÔNG gọi plateau theo từng batch."""
+
+    LR luôn được đặt TRƯỚC lần cập nhật dùng nó: constructor đặt LR cho update #1, và
+    mỗi batch_step() (gọi sau optimizer.step()) đặt LR cho update KẾ TIẾP. Với
+    warmup_steps=3, dãy LR thực sự được dùng là ⅓·LR → ⅔·LR → LR → LR …
+    (bản cũ gọi batch_step sau step nhưng đặt LR cho update vừa chạy, nên update đầu
+    tiên đã dùng nguyên LR rồi mới tụt về ⅓ — tức warmup bị lệch một nhịp.)
+
+    Sau khi hết warmup, batch_step KHÔNG đụng vào LR nữa để không ghi đè các lần giảm
+    LR của ReduceLROnPlateau."""
     def __init__(self, optimizer, base_lr, warmup_steps, plateau_kwargs=None):
         self.opt = optimizer
         self.base_lr = float(base_lr)
         self.warmup_steps = max(1, int(warmup_steps))
-        self.step_count = 0
+        self.updates_done = 0
         self.in_warmup = True
         pk = dict(mode='min', factor=0.5, patience=2, threshold=1e-4)
         if plateau_kwargs:
             pk.update(plateau_kwargs)
         self.plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, **pk)
+        self._set_lr_for_update(1)          # LR cho lần cập nhật ĐẦU TIÊN
+
+    def _set_lr(self, lr):
+        for pg in self.opt.param_groups:
+            pg['lr'] = lr
+        return lr
+
+    def _set_lr_for_update(self, k):
+        """Đặt LR sẽ dùng cho lần cập nhật thứ k (đánh số từ 1)."""
+        return self._set_lr(self.base_lr * min(k, self.warmup_steps) / self.warmup_steps)
 
     def batch_step(self):
-        """Gọi sau mỗi optimizer.step() — chỉ tác dụng trong pha warmup."""
-        self.step_count += 1
-        if self.step_count <= self.warmup_steps:
-            lr = self.base_lr * self.step_count / self.warmup_steps
-            for pg in self.opt.param_groups:
-                pg['lr'] = lr
-        elif self.in_warmup:
+        """Gọi SAU mỗi optimizer.step(): đặt LR cho lần cập nhật KẾ TIẾP.
+        Chỉ tác dụng trong pha warmup."""
+        self.updates_done += 1
+        if not self.in_warmup:
+            return
+        if self.updates_done >= self.warmup_steps:
             self.in_warmup = False
-            for pg in self.opt.param_groups:
-                pg['lr'] = self.base_lr
+            self._set_lr(self.base_lr)      # chốt LR gốc rồi nhường quyền cho plateau
+        else:
+            self._set_lr_for_update(self.updates_done + 1)
 
     def epoch_step(self, s_val):
         """Gọi cuối mỗi epoch (sau khi hết warmup) — plateau theo S_val."""
@@ -1022,8 +1106,10 @@ def trainable_state_dict(model):
     return {k: v.detach().cpu() for k, v in model.state_dict().items() if k in mutable_names}
 
 
-def save_ckpt(out_dir, epoch, model, gates, optimizer, metrics, filename='latest.pt',
+def save_ckpt(out_dir, epoch, model, optimizer, metrics, filename='latest.pt',
               val_ce=None, s_val=None, include_optimizer=True):
+    """Gate KHÔNG được lưu: nó là module tạm tạo lại mỗi batch (như code gốc Forget-MI),
+    không mang trạng thái học được nên không thuộc checkpoint."""
     cp = os.path.join(out_dir, "checkpoints")
     os.makedirs(cp, exist_ok=True)
     ts = trainable_state_dict(model)
@@ -1031,7 +1117,6 @@ def save_ckpt(out_dir, epoch, model, gates, optimizer, metrics, filename='latest
         'epoch': epoch,
         'trainable_state': ts,
         'lora_state': {k: v for k, v in ts.items() if 'lora' in k.lower()},
-        'gates': {n: g.state_dict() for n, g in gates.items()},
         'metrics': metrics, 'val_ce': val_ce, 's_val': s_val,
     }
     if include_optimizer:
@@ -1039,7 +1124,7 @@ def save_ckpt(out_dir, epoch, model, gates, optimizer, metrics, filename='latest
     torch.save(payload, os.path.join(cp, filename))
 
 
-def load_ckpt(out_dir, model, gates, optimizer):
+def load_ckpt(out_dir, model, optimizer):
     p = os.path.join(out_dir, "checkpoints", "latest.pt")
     if not os.path.exists(p):
         return -1
@@ -1047,9 +1132,6 @@ def load_ckpt(out_dir, model, gates, optimizer):
         cp = torch.load(p, map_location='cpu', weights_only=False)
         state = cp.get('trainable_state', cp.get('lora_state'))
         model.load_state_dict(state, strict=False)
-        for n, g in gates.items():
-            if n in cp['gates']:
-                g.load_state_dict(cp['gates'][n])
         if 'optimizer' in cp and optimizer is not None:
             optimizer.load_state_dict(cp['optimizer'])
         print(f"📂 Resumed from epoch {cp['epoch']}")
@@ -1235,15 +1317,23 @@ def reload_og_fp16(base_p, device):
     return m
 
 
-def make_gates(device):
-    """4 fusion gate (giống Forget-MI): ul_ret, ul_frg, og_rnd, og_ret."""
+def new_batch_gates(img_dim, txt_dim, device, roles=('ul_ret', 'ul_frg', 'og_rnd', 'og_ret')):
+    """Tạo MỚI một Gate cho TỪNG VAI TRÒ ở MỖI BATCH — bám đúng code gốc Forget-MI
+    (`forgetmi_partial.py`: gate_ul_ret / gate_ul_frgt / gate_og_rand / gate_og_ret
+    được khởi tạo bên trong vòng lặp batch).
+
+    Vì sao làm vậy (quy tắc paper↔code): Forget-MI chỉ nói joint embedding được dựng
+    bằng multimodal adaptation gate, KHÔNG quy định một gate dùng chung hay nhiều gate
+    riêng, cũng không nói gate ở train() hay eval(). Chi tiết paper bỏ ngỏ → theo code gốc.
+
+    Gate ở train mode mặc định (Dropout hoạt động) và KHÔNG được đưa vào optimizer,
+    nên tham số gate không bao giờ được cập nhật; gradient vẫn truyền qua phép gate
+    về embedding đầu vào (và từ đó xuống LoRA).
+
+    KHÔNG sao chép lỗi lập trình hiển nhiên của code gốc (dòng 403-404 dùng nhầm gate
+    và truyền ảnh hai lần thay vì ảnh+văn bản)."""
     from training.joint_embedding import Gate
-    return {
-        'ul_ret': Gate(768, 768).to(device),
-        'ul_frg': Gate(768, 768).to(device),
-        'og_rnd': Gate(768, 768).to(device),
-        'og_ret': Gate(768, 768).to(device),
-    }
+    return {r: Gate(inp1_size=int(img_dim), inp2_size=int(txt_dim)).to(device) for r in roles}
 
 
 def build_peft(model_unlearn, cfg, target_modules, rank_pattern=None, alpha_pattern=None):
@@ -1297,27 +1387,35 @@ def verify_lora_ranks(model, desired_full_ranks):
     return found, mismatches
 
 
-def unfreeze_classifier_heads(model, target_modules):
-    """LoRA chỉ đụng attention/conv; eval đọc img_logits (img_model.fc1) + txt classifier
-    → mở băng 2 head này để chúng nhận gradient (nếu chưa là PEFT target)."""
-    n_before = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    try:
-        if 'img_model.fc1' not in target_modules:
-            for p in model.img_model.fc1.parameters():
-                p.requires_grad = True
-        for p in model.text_model.classifier.parameters():
-            p.requires_grad = True
-    except AttributeError as e:
-        print(f"⚠️  Không mở băng được head: {e}")
-    n_after = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"🔓 Mở băng classifier heads: +{n_after - n_before:,} trainable")
+def enforce_lora_only(model):
+    """LoKU Sec. 3.5: giữ NGUYÊN trọng số pretrained, CHỈ cập nhật các thừa số hạng thấp
+    A, B. Vì vậy classifier heads (img_model.fc1, text_model.classifier) phải đóng băng —
+    nếu mở băng thì phần cập nhật unlearning bị hấp thụ ở head, claim 'LoRA-only' của
+    phương pháp không còn đúng (lỗi 9).
+
+    Gradient vẫn chảy QUA head (đóng băng ≠ chặn gradient) xuống các adapter LoRA."""
+    n_frozen = 0
+    for name, p in model.named_parameters():
+        if p.requires_grad and 'lora_' not in name:
+            p.requires_grad = False
+            n_frozen += p.numel()
+    leftover = [n for n, p in model.named_parameters() if p.requires_grad and 'lora_' not in n]
+    assert not leftover, f"Còn tham số trainable KHÔNG phải LoRA: {leftover[:5]}"
+    if n_frozen:
+        print(f"🔒 LoRA-only: đóng băng thêm {n_frozen:,} tham số ngoài LoRA (classifier heads…)")
+    else:
+        print("🔒 LoRA-only: mọi tham số trainable đều là LoRA ✓")
 
 
-def make_optimizer(model, gates, cfg):
+def make_optimizer(model, cfg):
+    """CHỈ tối ưu tham số LoRA (LoKU Sec. 3.5). Fusion gate KHÔNG vào optimizer (lỗi 10):
+    Forget-MI dùng gate để dựng joint embedding chứ không tối ưu nó — trong code gốc gate
+    là biến cục bộ tạo lại mỗi batch nên không thể nằm trong optimizer; LoKU chỉ tối ưu A,B.
+    → gate không được là nơi hấp thụ cập nhật unlearning."""
     from torch.optim import AdamW
-    params = [p for p in model.parameters() if p.requires_grad]
-    for g in gates.values():
-        params += [p for p in g.parameters() if p.requires_grad]
+    params = [p for n, p in model.named_parameters() if p.requires_grad and 'lora_' in n]
+    print(f"⚙️  Optimizer: {len(params)} tensor LoRA "
+          f"({sum(p.numel() for p in params):,} tham số) — không có gate/head")
     return AdamW(params, lr=float(cfg.learning_rate), weight_decay=float(cfg.weight_decay))
 
 
@@ -1336,15 +1434,16 @@ def set_bn_eval(model):
     return n
 
 
-def setup_experiment(cfg, device, rank_alloc_fn=None, gate_mode='free'):
+def setup_experiment(cfg, device, rank_alloc_fn=None):
     """Dựng TOÀN BỘ context dùng chung cho P3/P4/P5/P6/main:
-    models → dataset (4-tập) → Fisher → (rank_alloc_fn) → PEFT+FILA → mở băng head →
-    gates (gate_mode) → optimizer → dataloaders → margins (quantile) → og-perf → scheduler.
+    models → dataset (4-tập) → Fisher → (rank_alloc_fn) → PEFT+FILA → LoRA-only →
+    optimizer → dataloaders → thang d⁰ → og-perf → scheduler.
 
     rank_alloc_fn(f_imp, r_imp, target_modules, cfg) → (target_modules, rank_pattern,
     alpha_pattern): dùng cho P6 (phân rank theo Fisher, có thể LOẠI bớt module).
-    gate_mode ∈ {'free','frozen','reg'}: 'frozen' đóng băng gate; 'reg' lưu snapshot init
-    để phạt lệch khỏi gate gốc (dùng ở loss của phương pháp)."""
+
+    Fusion gate KHÔNG được dựng ở đây: bám code gốc Forget-MI, gate được tạo mới trong
+    từng batch (xem new_batch_gates) và không bao giờ nằm trong optimizer."""
     import time as _time
     ctx = build_base_models(cfg, device)
     print("📚 Building dataset (4-tập holdout)...")
@@ -1388,33 +1487,26 @@ def setup_experiment(cfg, device, rank_alloc_fn=None, gate_mode='free'):
     ctx['peft_cfg'] = peft_cfg
     img_sub = float(getattr(cfg, 'loku_image_subtract_scale',
                             getattr(cfg, 'loku_subtract_scale', 0.0)))
+    fila_subtraction = {}
     if getattr(cfg, 'loku_random_init', False):
         print("🎲 ABLATION: loku_random_init=True → BỎ Fisher/FILA init")
     else:
-        apply_loku_soft_init(model, f_imp, r_imp, target_modules,
+        fila_subtraction = apply_loku_soft_init(model, f_imp, r_imp, target_modules,
             r=int(cfg.lora_r), init_scale=float(getattr(cfg, 'loku_init_scale', 0.05)),
             subtract_scale=float(getattr(cfg, 'loku_subtract_scale', 0.0)),
             image_target_names=set(image_targets), image_subtract_scale=img_sub,
             rank_pattern=rank_pattern)
-    if getattr(cfg, 'unfreeze_classifier_heads', True):
-        unfreeze_classifier_heads(model, target_modules)
+    # LoKU Sec. 3.5: pretrained frozen, chỉ A,B được cập nhật (classifier heads ĐÓNG BĂNG)
+    enforce_lora_only(model)
+    ctx['fila_subtraction'] = fila_subtraction
     ctx['model_unlearn'] = model
     ctx['trainable'], ctx['total'] = count_params(model)
     print(f"📊 Trainable: {ctx['trainable']:,}/{ctx['total']:,} "
           f"({100*ctx['trainable']/ctx['total']:.3f}%)")
 
-    gates = make_gates(device)
-    if gate_mode == 'frozen':
-        for g in gates.values():
-            for p in g.parameters():
-                p.requires_grad = False
-        print("🔒 gate_mode=frozen: đóng băng fusion gate")
-    elif gate_mode == 'reg':
-        ctx['gate_init'] = {n: {k: v.detach().clone() for k, v in g.state_dict().items()}
-                            for n, g in gates.items()}
-        print("🪢 gate_mode=reg: gate trainable + phạt lệch khỏi gate gốc")
-    ctx['gates'] = gates; ctx['gate_mode'] = gate_mode
-    ctx['optimizer'] = make_optimizer(model, gates, cfg)
+    print("🚪 Fusion gate: tạo MỚI mỗi batch, riêng từng vai trò, KHÔNG vào optimizer "
+          "(bám code gốc Forget-MI)")
+    ctx['optimizer'] = make_optimizer(model, cfg)
 
     nw = min(int(getattr(cfg, 'num_cpu_workers', 2)), 2)
     ctx['nw'] = nw
@@ -1425,16 +1517,18 @@ def setup_experiment(cfg, device, rank_alloc_fn=None, gate_mode='free'):
         sampler=AlignedSampler(len(datasets['random']), shuffle=True, seed=42),
         batch_size=cfg.unlearn_batch_size, num_workers=nw, pin_memory=False)
 
-    q = float(getattr(cfg, 'margin_quantile', 0.90))
-    ctx['margins'] = compute_epoch0_margins(model, ctx['model_og'], gates,
-        ctx['forget_dl'], ctx['rand_dl'], cfg, device, quantile=q)
+    # thang chuẩn hóa d⁰ CHỈ cho selector S_val (không tham gia loss — xem compute_S_val)
+    ctx['ref_scales'] = compute_epoch0_scales(model, ctx['model_og'],
+        ctx['forget_dl'], ctx['rand_dl'], cfg, device)
     ctx['og_perf'] = precompute_og_perf(ctx['model_og'], datasets['sel'], device, cfg)
 
-    forget_batches = max(1, len(ctx['forget_dl']))
-    total_steps = forget_batches * int(cfg.unlearn_epochs)
+    # CADENCE (bám code gốc Forget-MI): gradient TÍCH LŨY qua các batch trong epoch,
+    # optimizer.step() MỘT LẦN ở cuối epoch → tổng số cập nhật = số epoch.
+    total_steps = int(cfg.unlearn_epochs)
     warmup_steps = max(1, int(float(getattr(cfg, 'warmup_proportion', 0.1)) * total_steps))
     ctx['scheduler'] = WarmupThenPlateau(ctx['optimizer'], float(cfg.learning_rate), warmup_steps)
     ctx['total_planned_steps'] = total_steps
+    ctx['forget_batches'] = max(1, len(ctx['forget_dl']))
     return ctx
 
 
@@ -1447,23 +1541,22 @@ def precompute_og_perf(model_og, sel_dataset, device, cfg):
     return perf
 
 
-def selection_metrics(model_ul, model_og, gates, datasets, forget_dl, rand_dl,
-                      margins, og_perf, cfg, device):
+def selection_metrics(model_ul, model_og, datasets, forget_dl, rand_dl,
+                      ref_scales, og_perf, cfg, device):
     """Tính S_val cho checkpoint hiện tại (KHÔNG dùng test_final/retrained).
     Trả dict {S_val, G_forget, G_privacy, G_utility, val_ce, ...}."""
     weights = (float(cfg.get('sel_w_forget', 1.0)), float(cfg.get('sel_w_privacy', 1.0)),
                float(cfg.get('sel_w_utility', 1.0)))
     deltas = (float(cfg.get('sel_delta_auc', 0.02)), float(cfg.get('sel_delta_f1', 0.02)))
     bs = int(cfg.eval_batch_size)
-    # G_forget (đánh giá IHL/UU/MU trên D_f, no-grad)
-    flosses = eval_forget_losses(model_ul, model_og, gates, forget_dl, rand_dl,
-                                 margins, cfg, device)
+    # G_forget (đánh giá IHL + khoảng cách quên d_u/d_m trên D_f, no-grad)
+    flosses = eval_forget_losses(model_ul, model_og, forget_dl, rand_dl, cfg, device)
     # G_privacy = MIA_val (member=r_heldout, non-member=sel, đoán forget)
     mia_v = val_mia(model_ul, datasets['r_heldout'], datasets['sel'], datasets['forget'],
                     device, cfg, batch_size=bs, seed=int(cfg.random_seed))
     # G_utility (ul perf trên sel vs og perf)
     ul_perf = perf_metrics(model_ul, datasets['sel'], device, cfg, batch_size=bs)
-    S = compute_S_val(flosses, mia_v, ul_perf, og_perf, margins, weights, deltas)
+    S = compute_S_val(flosses, mia_v, ul_perf, og_perf, ref_scales, weights, deltas)
     # val_ce (member held-out) — chỉ dùng cho ablation selector
     val_ce = float(per_sample_ce(model_ul, datasets['r_heldout'], device, cfg, bs).mean())
     S.update({'val_ce': val_ce, 'mia_val': mia_v,
@@ -1510,19 +1603,23 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
     → (weights, forget_active, guard_ihl) quyết định trọng số/giai đoạn TỪNG BATCH.
     Luôn zip(forget, rand, retain) để step/epoch nhất quán; combined_batch_loss tự bỏ
     forward forget khi forget_active=False & guard=0.
+
+    CADENCE (bám code gốc Forget-MI, xem forgetmi_partial.py): trong mỗi epoch, các batch
+    chỉ backward để TÍCH LŨY gradient; cuối epoch mới clip rồi optimizer.step() MỘT lần.
+    Không có epoch hiệu chỉnh không-cập-nhật như code gốc, vì retention margin đã bị bỏ
+    theo Eq.(3)-(4) của paper.
+
     select_by ∈ {'S_val','val_ce'} (đều nhỏ=tốt): tiêu chí chọn checkpoint. Mặc định S_val;
     'val_ce' chỉ dùng cho ABLATION SELECTOR của main. Trả (timing, best, total_steps)."""
     import time as _time
-    model_ul = ctx['model_unlearn']; gates = ctx['gates']
+    model_ul = ctx['model_unlearn']
     optimizer = ctx['optimizer']; sched = ctx['scheduler']; datasets = ctx['datasets']
     grad_clip = float(getattr(cfg, 'grad_clip', 1.0))
-    retain_margins = {'ur': None, 'mr': None}
     history_csv = getattr(cfg, 'history_csv_path', None)
-    trainable_params = [p for p in model_ul.parameters() if p.requires_grad]
-    gate_params = [p for g in gates.values() for p in g.parameters() if p.requires_grad]
+    trainable_params = [p for p in model_ul.parameters() if p.requires_grad]   # chỉ LoRA
 
     best = {'s_val': 1e9, 'sel_value': 1e9, 'select_by': select_by,
-            'epoch': None, 'state': None, 'gates': None, 'metrics': None}
+            'epoch': None, 'state': None, 'metrics': None}
     total_steps = 0
     total_planned = max(1, int(ctx.get('total_planned_steps', 1)))
     t_train = t_sel = 0.0
@@ -1545,43 +1642,47 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
     for epoch in range(int(cfg.unlearn_epochs)):
         _t = _time.time()
         model_ul.train()
-        _nbn = set_bn_eval(model_ul)     # BN giữ eval (running-stats) → khớp margin, đúng chuẩn LoRA
+        _nbn = set_bn_eval(model_ul)     # BN giữ eval (running-stats) — đúng chuẩn LoRA base đóng băng
         if epoch == 0:
             print(f"   🧊 giữ {_nbn} BatchNorm ở eval-mode trong lúc train (base đóng băng)")
-        for g in gates.values():
-            g.train()
         retain_dl = DataLoader(datasets['retain'], sampler=torch.utils.data.RandomSampler(datasets['retain']),
                                batch_size=cfg.unlearn_batch_size, num_workers=ctx['nw'])
+        n_batches = max(1, int(ctx.get('forget_batches', 1)))
+        n_ep = max(1, int(cfg.unlearn_epochs))
         agg = {}; steps = 0
-        for fb, rb, retb in zip(ctx['forget_dl'], ctx['rand_dl'], retain_dl):
-            global_frac = total_steps / total_planned
+        optimizer.zero_grad()                 # gradient TÍCH LŨY suốt epoch
+        for bi, (fb, rb, retb) in enumerate(zip(ctx['forget_dl'], ctx['rand_dl'], retain_dl)):
+            # tiến trình mượt trong epoch để lịch trọng số của P5 không bị bậc thang
+            global_frac = min(1.0, (epoch + bi / n_batches) / n_ep)
             weights, forget_active, guard_ihl = weight_fn(cfg, ctx, epoch, global_frac)
-            loss, comp = combined_batch_loss(cfg, ctx, fb, rb, retb, device, retain_margins,
-                                             weights, forget_active=forget_active, guard_ihl=guard_ihl)
-            optimizer.zero_grad()
-            loss.backward()
-            if grad_clip and (trainable_params or gate_params):
-                torch.nn.utils.clip_grad_norm_(trainable_params + gate_params, grad_clip)
-            optimizer.step()
-            sched.batch_step()
-            total_steps += 1; steps += 1
+            loss, comp = combined_batch_loss(cfg, ctx, fb, rb, retb, device, weights,
+                                             forget_active=forget_active, guard_ihl=guard_ihl)
+            loss.backward()                   # KHÔNG step ở đây
+            steps += 1
             for k, v in comp.items():
                 agg[k] = agg.get(k, 0.0) + v
+        # ---- cuối epoch: clip rồi cập nhật MỘT lần (cadence của code gốc Forget-MI) ----
+        if grad_clip and trainable_params:
+            torch.nn.utils.clip_grad_norm_(trainable_params, grad_clip)
+        optimizer.step()
+        optimizer.zero_grad()
+        sched.batch_step()
+        total_steps += 1
         avg = {k: v / max(steps, 1) for k, v in agg.items()}
         t_train += _time.time() - _t
 
         _t = _time.time()
-        S = selection_metrics(model_ul, ctx['model_og'], gates, datasets,
-                              ctx['forget_dl'], ctx['rand_dl'], ctx['margins'],
+        S = selection_metrics(model_ul, ctx['model_og'], datasets,
+                              ctx['forget_dl'], ctx['rand_dl'], ctx['ref_scales'],
                               ctx['og_perf'], cfg, device)
         sched.epoch_step(S['S_val'])
         t_sel += _time.time() - _t
 
-        m_u, m_m = ctx['margins']
+        d_u0, d_m0 = ctx['ref_scales']
         print(f"[{method} E{epoch:02d}] loss={avg.get('Total', 0):+.3f} "
-              f"UU={avg.get('UU', 0):.4f} MU={avg.get('MU', 0):.4f} "
-              f"(act {avg.get('uu_active', 0):.2f}/{avg.get('mu_active', 0):.2f}, "
-              f"d̄ {avg.get('d_u_mean', 0):.3f}/{avg.get('d_m_mean', 0):.2f}) "
+              f"UU={avg.get('UU', 0):+.4f} MU={avg.get('MU', 0):+.4f} "
+              f"(d̄ {avg.get('d_u_mean', 0):.3f}/{avg.get('d_m_mean', 0):.2f} "
+              f"vs d⁰ {d_u0:.3f}/{d_m0:.2f}) "
               f"CE={avg.get('CE', 0):.3f} KD={avg.get('KD', 0):.4f} IHL={avg.get('IHL', 0):.3f} "
               f"| S_val={S['S_val']:.4f} (Gf={S['G_forget']:.3f} Gp={S['G_privacy']:.3f} "
               f"Gu={S['G_utility']:.3f}) val_ce={S['val_ce']:.3f}")
@@ -1602,15 +1703,13 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
                     'seed': int(cfg.random_seed), 'epoch': epoch + 1,
                     **{k: (round(v, 4) if isinstance(v, float) else v) for k, v in te.items()}})
 
-        save_ckpt(ctx['out_dir'], epoch, model_ul, gates, optimizer, avg,
+        save_ckpt(ctx['out_dir'], epoch, model_ul, optimizer, avg,
                   filename='latest.pt', val_ce=S['val_ce'], s_val=S['S_val'])
         sel_value = S[select_by]
         # isfinite guard: checkpoint có S_val/val_ce = nan/inf KHÔNG BAO GIỜ được chọn.
         if np.isfinite(sel_value) and sel_value < best['sel_value']:
             best.update({'sel_value': sel_value, 's_val': S['S_val'], 'epoch': epoch,
                          'state': {k: v.clone() for k, v in trainable_state_dict(model_ul).items()},
-                         'gates': {n: {k: v.detach().cpu().clone() for k, v in g.state_dict().items()}
-                                   for n, g in gates.items()},
                          'metrics': dict(S)})
         if history_csv:
             append_history_row(history_csv, {
@@ -1619,9 +1718,9 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
                 'G_privacy': S['G_privacy'], 'G_utility': S['G_utility'], 'val_ce': S['val_ce'],
                 'mia_val': S['mia_val'], 'total_loss': avg.get('Total', 0),
                 'ihl': avg.get('IHL', 0), 'uu': avg.get('UU', 0), 'mu': avg.get('MU', 0),
-                'uu_active': avg.get('uu_active', 0), 'mu_active': avg.get('mu_active', 0),
                 'd_u_mean': avg.get('d_u_mean', 0), 'd_m_mean': avg.get('d_m_mean', 0),
-                'margin_u': m_u, 'margin_m': m_m,
+                'ref_d_u': d_u0, 'ref_d_m': d_m0,
+                'sel_d_u': S.get('floss_d_u', 0), 'sel_d_m': S.get('floss_d_m', 0),
                 'ur': avg.get('UR', 0), 'mr': avg.get('MR', 0), 'ce': avg.get('CE', 0),
                 'kd': avg.get('KD', 0), 'cum_optimizer_steps': total_steps,
             })
@@ -1638,7 +1737,7 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
         cp = os.path.join(ctx['out_dir'], 'checkpoints')
         os.makedirs(cp, exist_ok=True)
         torch.save({'epoch': best['epoch'], 'trainable_state': best['state'],
-                    'gates': best['gates'], 's_val': best['s_val']},
+                    's_val': best['s_val']},
                    os.path.join(cp, 'selected.pt'))
 
     timing = {'train_h': t_train / 3600, 'sel_h': t_sel / 3600,
@@ -1647,28 +1746,69 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
     return timing, best, total_steps
 
 
+@torch.no_grad()
+def _probe_logits(model, dataset, device, cfg, n_batches=2):
+    """Lấy chữ ký img_logits trên vài batch cố định để đối chiếu hai model (verify)."""
+    loader = DataLoader(dataset, batch_size=int(cfg.eval_batch_size), shuffle=False)
+    model.eval()
+    out = []
+    for bi, batch in enumerate(loader):
+        if bi >= n_batches:
+            break
+        batch = tuple(t.to(device, non_blocking=True) if torch.is_tensor(t) else t for t in batch)
+        inputs, _, _ = get_model_inputs(cfg, batch, device)
+        out.append(safe_forward(model, inputs)[1].float().cpu())
+    return torch.cat(out) if out else torch.empty(0)
+
+
 def finalize_and_eval(cfg, ctx, device, method, run_id, timing, best, total_steps,
                       csv_path, extra_row=None):
-    """Eval LAST(E29) + SELECTED(S_val min) trên D_t_final; ghi CSV cả hai."""
+    """Eval LAST(E29) + SELECTED(S_val min) trên D_t_final; ghi CSV cả hai.
+
+    SELECTED phải giữ ĐÚNG reparameterization của LoKU: base = W* = W − B*A*. Dựng lại
+    từ pretrained rồi chỉ nạp state LoRA sẽ cho base = W (MẤT phép trừ bù) → checkpoint
+    sai hoàn toàn. Vì vậy ta áp lại ctx['fila_subtraction'] trước khi nạp adapter, rồi
+    ĐỐI CHIẾU output với model sống ở cùng trạng thái best (sai số phải ~0)."""
     from joint_img_txt.model import ImageTextModel
     from peft import get_peft_model
     extra_row = dict(extra_row or {})
-    extra_row.update({'margin_u': round(float(ctx['margins'][0]), 4),
-                      'margin_m': round(float(ctx['margins'][1]), 4)})
-    # LAST
+    extra_row.update({'ref_d_u': round(float(ctx['ref_scales'][0]), 4),
+                      'ref_d_m': round(float(ctx['ref_scales'][1]), 4)})
+
+    # ---- chữ ký tham chiếu: model SỐNG (base đã có FILA subtraction) ở trạng thái best ----
+    ref_probe, probe_ds = None, ctx['datasets']['test_final']
+    if best['epoch'] is not None:
+        live = ctx['model_unlearn']
+        last_state = {k: v.detach().cpu().clone() for k, v in trainable_state_dict(live).items()}
+        live.load_state_dict({k: v.to(device) for k, v in best['state'].items()}, strict=False)
+        ref_probe = _probe_logits(live, probe_ds, device, cfg)
+        live.load_state_dict({k: v.to(device) for k, v in last_state.items()}, strict=False)
+
+    # LAST (model sống → base đã đúng W*)
     last_model = ctx['model_unlearn'].merge_and_unload()
     final_evaluation(last_model, ctx['model_re'], ctx['datasets'], cfg, device, method, run_id,
         checkpoint_kind='last', selected_epoch=timing['last_epoch'] + 1, timing=timing,
         trainable=ctx['trainable'], total=ctx['total'], total_optimizer_steps=total_steps,
         csv_path=csv_path, gold_available=ctx['gold_available'], extra_row=extra_row)
     del last_model; torch.cuda.empty_cache()
-    # SELECTED
+
+    # SELECTED (dựng lại: pretrained → PEFT → ÁP LẠI W* = W − B*A* → nạp LoRA đã học)
     if best['epoch'] is not None:
         base = ImageTextModel.from_pretrained(ctx['base_p']).to(device)
         peft = get_peft_model(base, ctx['peft_cfg'])
-        peft.load_state_dict(best['state'], strict=False)
-        sel_model = peft.merge_and_unload()
+        apply_fila_subtraction(peft, ctx.get('fila_subtraction', {}))
+        peft.load_state_dict({k: v.to(device) for k, v in best['state'].items()}, strict=False)
         er = dict(extra_row); er['best_s_val'] = round(float(best['s_val']), 4)
+        # verify: selected dựng lại phải trùng model sống ở cùng trạng thái best
+        if ref_probe is not None and ref_probe.numel():
+            diff = float((_probe_logits(peft, probe_ds, device, cfg) - ref_probe).abs().max())
+            er['selected_rebuild_maxdiff'] = round(diff, 6)
+            ok = diff < 1e-2
+            print(f"{'✅' if ok else '❌'} verify selected-rebuild vs live: max|Δlogit|={diff:.6f}")
+            if not ok:
+                print("   ⚠️  LỆCH LỚN → checkpoint 'selected' có thể mất phép trừ bù FILA. "
+                      "Kiểm tra ctx['fila_subtraction'] và peft_cfg.")
+        sel_model = peft.merge_and_unload()
         final_evaluation(sel_model, ctx['model_re'], ctx['datasets'], cfg, device, method, run_id,
             checkpoint_kind='selected', selected_epoch=best['epoch'] + 1, timing=timing,
             trainable=ctx['trainable'], total=ctx['total'], total_optimizer_steps=total_steps,

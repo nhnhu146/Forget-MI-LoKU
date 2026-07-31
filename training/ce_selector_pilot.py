@@ -307,27 +307,19 @@ def main():
     dataset, _ = build_dataset(cfg, tok)
     test_ds, forget_ds, retain_ds = dataset['test'], dataset['forget'], dataset['retain']
 
-    # ---- 1) split test -> D_nm_val (25%) / D_t_final (75%) theo bệnh nhân + phân tầng ----
-    nm_idx, tf_idx, nm_rids, tf_rids, subj_of, lab_of, dicom_of = _split_test_by_patient(
-        test_ds, cfg.data_split_path, cli.split_seed, cli.nm_val_ratio)
-    nm_val_ds = Subset(test_ds, nm_idx); tfinal_ds = Subset(test_ds, tf_idx)
-
-    # ---- 9) sanity checks bắt buộc ----
-    nm_subj = set(subj_of[r] for r in nm_rids); tf_subj = set(subj_of[r] for r in tf_rids)
-    assert set(nm_rids).isdisjoint(set(tf_rids)), 'D_nm_val & D_t_final CHUNG report_id!'
-    assert nm_subj.isdisjoint(tf_subj), 'MỘT bệnh nhân xuất hiện ở CẢ D_nm_val và D_t_final!'
-    dnm, dtf = _dist(nm_rids, lab_of, subj_of), _dist(tf_rids, lab_of, subj_of)
-    print(f"[split] test_full={len(nm_rids) + len(tf_rids)}  D_nm_val(25%)={dnm['n']}  D_t_final(75%)={dtf['n']}")
-    print(f"[split] D_nm_val : class={dnm['class_dist']}  patients={dnm['n_patients']}")
-    print(f"[split] D_t_final: class={dtf['class_dist']}  patients={dtf['n_patients']}")
-    print(f"[split] patient disjoint OK · id disjoint OK · (test rows = og-unseen theo split gốc)")
-    _write_manifest_csv(os.path.join(cli.out_dir, f'nonmember_val_25_s{cli.split_seed}.csv'),
-                        nm_rids, dicom_of, subj_of, lab_of)
-    _write_manifest_csv(os.path.join(cli.out_dir, f'final_test_75_s{cli.split_seed}.csv'),
-                        tf_rids, dicom_of, subj_of, lab_of)
-    json.dump({'split_seed': cli.split_seed, 'nonmember_val_ratio': cli.nm_val_ratio,
-               'n_test_full': len(nm_rids) + len(tf_rids), 'D_nm_val': dnm, 'D_t_final': dtf,
-               'patient_disjoint': True, 'id_disjoint': True},
+    # ---- 1) D_nm_val / D_t_final: LẤY THẲNG từ protocol chung với P3 ----
+    # build_dataset nay trả dataset['sel'] (25% test) và dataset['test'] (=test_final, 75%)
+    # do data_split_advanced chia. KHÔNG cắt lại test_ds nữa: test_ds ĐÃ là test_final, cắt
+    # thêm sẽ cho D_nm_val nằm TRONG tập chấm điểm (rò rỉ) và lệch mẫu so với P3.
+    nm_val_ds, tfinal_ds = dataset['sel'], test_ds
+    assert len(nm_val_ds) > 0 and len(tfinal_ds) > 0, 'sel/test_final rỗng'
+    print(f"[split] dùng protocol chung P3: D_nm_val(sel)={len(nm_val_ds)}  "
+          f"D_t_final={len(tfinal_ds)}  (đã tách theo bệnh nhân + phân tầng trong data_split)")
+    json.dump({'split_seed': cli.split_seed,
+               'source': 'data_split_advanced (protocol chung với P3)',
+               'n_D_nm_val': len(nm_val_ds), 'n_D_t_final': len(tfinal_ds),
+               'note': 'sel và test_final do data_split_advanced tách theo bệnh nhân + phân tầng; '
+                       'KHÔNG cắt lại ở đây nên không có rò rỉ giữa hai tập.'},
               open(os.path.join(cli.out_dir, 'split_manifest.json'), 'w'), indent=2)
 
     # ---- 2) eval mỗi checkpoint E0..E(max-1): forget_ce (D_f) + nm_val_ce + utility (D_nm_val) ----

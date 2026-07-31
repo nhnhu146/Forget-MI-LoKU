@@ -11,9 +11,10 @@
 #
 # Nền cấu hình lấy TỪ 2 PAPER (Forget-MI + LoKU), KHÔNG phải config D cũ:
 #   Forget-MI: use_noise=true(μ0/σ0.1), 30 epoch, bs16, wd0.01, warmup0.1,
-#              UR=1/UU=1/MU=2/MR=2.  LoKU: r=8, α=16(α/r=2), dropout0.05, FILA, IHL.
-#   Điểm mới (IHL/CE/KD=1, margin=quantile0.90, lr=2e-4) = khởi điểm nguyên tắc,
-#   chỉ tinh chỉnh trên validation.
+#              UR=1/UU=1/MU=2/MR=2, UU/MU=−Dist, UR/MR=Dist (KHÔNG margin).
+#   LoKU: r=8, α=16(α/r=2), dropout0.05, empirical Fisher per-sample, FILA, IHL,
+#         CHỈ LoRA trainable (head + fusion gate đóng băng).
+#   Điểm mới (IHL/CE/KD=1, lr=2e-4) = khởi điểm nguyên tắc, chỉ tinh chỉnh trên validation.
 #
 # Chạy (notebook Kaggle tự override paths + forget_set_path + id):
 #   python training/forgetmi_p3.py --config config_advanced_kaggle.yaml --seed 42 \
@@ -58,7 +59,11 @@ common:
   learning_rate: 2.0e-4       # LoRA + FILA nhạy → 2e-4 (sweep {1e-4,2e-4,5e-4} nếu cần)
   weight_decay: 0.01
   warmup_proportion: 0.1      # warmup theo global step 10% đầu, sau đó ReduceLROnPlateau/epoch theo S_val
-  grad_clip: 1.0
+  # grad_clip=0 → TẮT clipping. Lý do: Forget-MI paper không quy định gradient clipping và
+  # code gốc thực tế KHÔNG clip (điều kiện `'grad' in optimizer_grouped_parameters` luôn
+  # False); LoKU cũng không coi đây là thành phần phương pháp. Để P3 và baseline Forget-MI
+  # cùng cadence và không bên nào có thêm cơ chế ổn định gradient riêng → đặt 0.
+  grad_clip: 0.0
   num_cpu_workers: 2
 
   # ===== Loss weights (nền paper) =====
@@ -70,10 +75,11 @@ common:
   lambda_kd: 1.0
   lambda_ihl: 1.0
   distill_temperature: 2.0
-  unfreeze_classifier_heads: true
-
-  # ===== Margin (đẩy-xa chặn TRẦN, quantile) =====
-  margin_quantile: 0.90
+  # KHÔNG còn unfreeze_classifier_heads / margin_quantile:
+  #  - LoKU Sec.3.5 chỉ tối ưu A,B → classifier heads + fusion gate ĐÓNG BĂNG (bắt buộc,
+  #    code assert mọi tham số trainable đều là LoRA).
+  #  - Forget-MI Eq.(1)-(4) dùng −Dist / Dist thuần → KHÔNG có margin trong loss.
+  #    Thang chuẩn hóa d⁰ của selector S_val đo tự động tại epoch 0, không cần cấu hình.
 
   # ===== LoRA + FILA (LoKU) =====
   lora_r: 8
@@ -125,11 +131,9 @@ methods:
     # p5_preset_6per: "1.0,1.0,1.5,1.0,1.0,1.0,1.0"
     # p5_preset_10per: "2.0,1.0,1.0,2.0,1.0,1.5,1.0"
 
-  # --- P6: rank theo Fisher riêng nhánh (α/r=2), gate đóng băng ---
+  # --- P6: rank theo Fisher riêng nhánh (α/r=2); fusion gate luôn cố định ---
   p6:
     id: "p6_3per"
-    gate_mode: "frozen"        # {frozen, reg, free}
-    lambda_gate_reg: 0.1       # chỉ dùng khi gate_mode=reg
     p6_rank_high: 16
     p6_rank_mid: 8             # = lora_r → dùng default rank
     p6_top_pct: 0.30
@@ -139,8 +143,6 @@ methods:
   main:
     id: "main_3per"
     selector: "sval"           # {sval, valce} — valce chỉ cho ablation selector
-    gate_mode: "frozen"
-    lambda_gate_reg: 0.1
     schedule_decay_rate: 3.0
     p6_rank_high: 16
     p6_rank_mid: 8

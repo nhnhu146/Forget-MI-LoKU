@@ -3,15 +3,20 @@
 forgetmi_p3.py — PHƯƠNG ÁN 3: Quên đồng thời ở đầu ra + không gian biểu diễn
 ============================================================================
   L = λ_IHL·L_IHL                      # quên ĐẦU RA (LoKU inverted-hinge, bounded [0,2])
-    + λ_UU·L_UU_b + λ_MU·L_MU_b        # quên BIỂU DIỄN đơn/đa phương thức — hinge ĐẨY-XA chặn TRẦN
-    + λ_UR·L_UR   + λ_MR·L_MR          # GIỮ biểu diễn retain gần model gốc (hinge Forget-MI)
+    + λ_UU·L_UU   + λ_MU·L_MU          # quên BIỂU DIỄN đơn/đa phương thức (Forget-MI Eq.(1)-(2))
+    + λ_UR·L_UR   + λ_MR·L_MR          # GIỮ biểu diễn retain gần model gốc (Forget-MI Eq.(3)-(4))
     + λ_CE·L_CE   + λ_KD·L_KD          # GIỮ utility: CE(D_r) + KD(ul‖og)(D_r)
 
-Hinge đẩy-xa chặn TRẦN (use_noise=true, tham chiếu og_rnd là bản nhiễu σ=0.1):
-  L_UU_b = ReLU(m_u − d_u),  L_MU_b = ReLU(m_m − d_m);  m = quantile-0.90 của {d_i} tại epoch 0.
+QUÊN biểu diễn = ÂM khoảng cách Euclid tới tham chiếu NHIỄU (use_noise=true, ảnh Gaussian
+σ=0.1 + text perturbation), ĐÚNG Forget-MI Eq.(1)-(2):
+  L_UU = −Dist([F_ul(I_f),F_ul(T_f)], [F_og(Ĩ_f),F_og(T̃_f)])
+  L_MU = −Dist(F_ul((I_f,T_f)),        F_og((Ĩ_f,T̃_f)))
+GIỮ biểu diễn = khoảng cách Euclid THUẦN trên D_r (Forget-MI Eq.(3)-(4)) — không margin,
+không cap min(d,m). IHL giữ nguyên như thành phần LoKU cho quên ở đầu ra.
 
 30 epoch (ngân sách Forget-MI). Trọng số CỐ ĐỊNH suốt quá trình (khác P5). Chọn checkpoint
-bằng S_val (validation, không dùng test/retrained), báo cáo cả last(E29). Eval trên D_t_final.
+bằng S_val — PROTOCOL RIÊNG của luận văn (validation, không dùng test/retrained), báo cáo
+cả last(E29). Eval trên D_t_final.
 
 Chạy:
   python training/forgetmi_p3.py --config config_advanced_kaggle.yaml --seed 42 \

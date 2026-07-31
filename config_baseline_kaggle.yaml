@@ -62,9 +62,16 @@ parameters:
   reprocess_input_data:
     value: false
   validation_ratio:
-    value: 0.1
+    value: 0.1                                               # KHÔNG còn dùng (xem test_sel_splits/retain_heldout_splits)
   random_point_ratio:
-    value: 0.1
+    value: 0.1                                               # KHÔNG còn dùng
+  # Holdout DÙNG CHUNG với P3 (config_advanced_kaggle.yaml) — phải giữ y hệt để hai
+  # phương pháp đánh giá trên CÙNG các mẫu: test → 25% sel + 75% test_final;
+  # D_r → 10% r_heldout (validation, không train) + 90% retain.
+  test_sel_splits:
+    value: 4
+  retain_heldout_splits:
+    value: 10
   random_seed:
     value: 42                                                # override qua --seed
   id:
@@ -78,7 +85,11 @@ parameters:
   overwrite_output_dir:
     value: true
   use_noise:
-    value: false                                             # paper "Unimodal" setting
+    # true = mô tả ĐÚNG thực nghiệm: tập random LUÔN là bản nhiễu (ảnh Gaussian σ=0.1 +
+    # text perturbation), và UU/MU = −Dist tới bản nhiễu đó theo Eq.(1)-(2).
+    # Cờ này KHÔNG còn điều khiển gì trong code (ở bản gốc nó chỉ đảo dấu loss; nay cả hai
+    # nhánh đã về −Dist nên nhánh rẽ bị gộp). Giữ = true để config/log không nói sai.
+    value: true
   learning_rate:
     value: 1.0e-5                                            # paper Section 3 mentions both 1e-4 and 1e-5 — using 1e-5 (lower) to avoid over-forgetting on subset 3%
   weight_decay:
@@ -110,7 +121,7 @@ parameters:
   max_grad_norm:
     value: 1.0
 
-  # ===== Noise (only used if use_noise=true) =====
+  # ===== Noise — LUÔN áp cho tập random (không phụ thuộc cờ use_noise) =====
   noise_mean:
     value: 0
   noise_std:
@@ -118,7 +129,7 @@ parameters:
 
   # ===== Loss weights — ĐÚNG config.yaml GỐC của paper (alpha=1,beta=1,theta=2,gamma=2) =====
   # Chuẩn hóa: 0.17/0.17/0.33/0.33 (Multimodal-leaning). KHÔNG dùng 4/4/1/1 ("Unimodal")
-  # vì beta(UU) cao + use_noise=false (L_uu = -dist, đẩy-ra-xa không chặn) → over-forget.
+  # vì beta(UU) cao + L_uu = −Dist (đẩy-ra-xa không chặn theo Eq.(1)) → over-forget.
   # Code maps: alpha=UKR(giữ uni), beta=UU(quên uni), theta=MD(quên multi), gamma=MKR(giữ multi)
   alpha:
     value: 1                                                 # UKR weight (raw, sẽ normalize)

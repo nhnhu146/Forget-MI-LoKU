@@ -1,4 +1,26 @@
 #!/usr/bin/env python3
+"""forgetmi_partial.py — TÁI LẬP Forget-MI, dùng làm BASELINE đối chứng cho P3.
+
+Quy tắc đối chiếu (áp dụng cho MỌI khác biệt paper ↔ code gốc):
+  paper mô tả ĐẦY ĐỦ → theo paper;  paper bỏ ngỏ/mơ hồ → theo code gốc của tác giả;
+  không cố tình sao chép lỗi lập trình hiển nhiên.
+
+THEO PAPER (khác code gốc `Original-Code/.../forgetmi_partial.py`):
+  - Eq.(1)-(2): L_UU, L_MU = ÂM khoảng cách Euclid tới tham chiếu NHIỄU. Code gốc để dấu
+    DƯƠNG ở nhánh use_noise=true (kéo lại gần) — trái phương trình paper.
+  - Eq.(3)-(4): L_UR, L_MR = khoảng cách Euclid THUẦN. Đã bỏ margin=(L+1) đo ở epoch 0 và
+    torch.minimum(L, margin) của code gốc; KHÔNG thay bằng cơ chế nào khác.
+  - Hệ quả: epoch 0 không còn là epoch "chỉ đo margin" → backward + cập nhật từ epoch đầu,
+    30 epoch = 30 lần cập nhật (code gốc: 29).
+
+THEO CODE GỐC (paper không quy định):
+  - Cadence: gradient tích lũy qua các batch trong epoch, optimizer.step() MỘT lần cuối epoch.
+  - Fusion Gate: tạo mới mỗi batch, riêng từng vai trò, train mode mặc định, KHÔNG vào optimizer.
+  - Tập random luôn là bản nhiễu (ảnh Gaussian σ + text perturbation).
+
+KHÔNG đưa thành phần của LoKU/P3 sang đây: không Fisher, FILA, LoRA, IHL, CE/KD bổ sung,
+không đóng băng head, không checkpoint W*. Baseline vẫn là full fine-tuning.
+"""
 from datetime import datetime
 import os
 import random
@@ -216,7 +238,13 @@ def build_dataset(args, tokenizer, image_noise_params=None):
     noisy_txt_labels = {f.report_id: f.label_id for f in noisy_features}
 
     retain_img_labels, retain_img_txt_ids, val_img_labels, val_img_txt_ids, test_img_labels, test_img_txt_ids, rand_img_labels, rand_img_txt_ids, \
-        forget_img_labels, forget_img_txt_ids, n_retain, n_val, n_test, n_rand, n_forget = data_split(args.data_split_path, args.forget_set_path, args.random_point_ratio, args.validation_ratio)
+        forget_img_labels, forget_img_txt_ids, n_retain, n_val, n_test, n_rand, n_forget, \
+        sel_img_labels, sel_img_txt_ids = data_split(
+            args.data_split_path, args.forget_set_path,
+            seed=int(getattr(args, 'random_seed', 42)),
+            test_sel_splits=int(getattr(args, 'test_sel_splits', 4)),
+            retain_heldout_splits=int(getattr(args, 'retain_heldout_splits', 10)))
+    n_sel = len(sel_img_txt_ids)
 
     # Drop items whose study_id has no cached text features (else KeyError mid-DataLoader).
     # Same root cause + fix as forgetmi_loku.py build_dataset.
@@ -235,6 +263,7 @@ def build_dataset(args, tokenizer, image_noise_params=None):
     test_img_txt_ids,   test_img_labels   = _filter_valid(test_img_txt_ids,   test_img_labels,   all_txt_tokens,   'test')
     forget_img_txt_ids, forget_img_labels = _filter_valid(forget_img_txt_ids, forget_img_labels, all_txt_tokens,   'forget')
     rand_img_txt_ids,   rand_img_labels   = _filter_valid(rand_img_txt_ids,   rand_img_labels,   noisy_txt_tokens, 'random')
+    sel_img_txt_ids,    sel_img_labels    = _filter_valid(sel_img_txt_ids,    sel_img_labels,    all_txt_tokens,   'sel')
 
     # Loud error if filter wiped a set that SHOULD have had items (cache totally stale):
     # silent no-op would otherwise produce a trained-on-nothing model that still passes
@@ -288,98 +317,96 @@ def build_dataset(args, tokenizer, image_noise_params=None):
                                   forget_img_labels, dataset_split_path=args.data_split_path, transform=xray_transform, 
                                   output_channel_encoding = args.output_channel_encoding)
 
-    val_dataset = CXRImageTextDataset(args.id, 
-                                all_txt_tokens, all_txt_masks, all_txt_segments, 
-                                all_txt_labels, val_img_txt_ids, args.img_data_dir, 
-                                val_img_labels, dataset_split_path=args.data_split_path, transform=xray_transform, 
+    val_dataset = CXRImageTextDataset(args.id,
+                                all_txt_tokens, all_txt_masks, all_txt_segments,
+                                all_txt_labels, val_img_txt_ids, args.img_data_dir,
+                                val_img_labels, dataset_split_path=args.data_split_path, transform=xray_transform,
                                 output_channel_encoding=args.output_channel_encoding)
-                      
-    print(f"Datasets: retain={len(retain_dataset)} val={len(val_dataset)} test={len(test_dataset)} forget={len(forget_dataset)} random={len(rand_dataset)}")
+
+    # D_nm_val cho selector S1–S4 (25% test, og chưa từng thấy). KHÔNG dùng để train, chỉ
+    # để đo nm_val_ce + utility → dùng CenterCrop (tất định) ĐÚNG NHƯ P3 dùng cho tập `sel`,
+    # để trajectory CE của hai phương pháp so được với nhau.
+    sel_dataset = CXRImageTextDataset(args.id,
+                                all_txt_tokens, all_txt_masks, all_txt_segments,
+                                all_txt_labels, sel_img_txt_ids, args.img_data_dir,
+                                sel_img_labels, dataset_split_path=args.data_split_path,
+                                transform=CenterCrop(2048),
+                                output_channel_encoding=args.output_channel_encoding)
+
+    print(f"Datasets: retain={len(retain_dataset)} val={len(val_dataset)} test={len(test_dataset)} "
+          f"forget={len(forget_dataset)} random={len(rand_dataset)} sel={len(sel_dataset)}")
 
     dataset = {
         'retain': retain_dataset,
         'validation': val_dataset,
         'test': test_dataset,
+        'sel': sel_dataset,
         'random': rand_dataset,
         'forget': forget_dataset,
         'n_retain': n_retain,
-        'n_val': n_val,  
+        'n_val': n_val,
         'n_test': n_test,
         'n_rand': n_rand,
         'n_forget': n_forget,
+        'n_sel': n_sel,
     }
 
     return dataset, num_labels
-def data_split(split_list_path, forget_ids_path, rand_ratio, validation_ratio=0.1):
+def data_split(split_list_path, forget_ids_path, rand_ratio=None, validation_ratio=None,
+               seed=42, test_sel_splits=4, retain_heldout_splits=10):
+    """Chia dữ liệu cho baseline Forget-MI — DÙNG CHUNG protocol holdout với P3.
 
-    random.seed(0)
+    Vì sao không giữ hàm split của code gốc:
+      (1) LỖI LẬP TRÌNH rõ ràng — sau khi tách val_ids bằng train_test_split, code gốc lại
+          `train_labels.update(...)` đưa validation NGƯỢC vào tập train (và làm HAI lần).
+          Validation vì thế nằm trong tập được huấn luyện → val-CE không còn là tín hiệu
+          held-out, chọn checkpoint theo nó là rò rỉ. Theo quy tắc đã chốt, không sao chép
+          lỗi lập trình hiển nhiên.
+      (2) CÔNG BẰNG — để so P3 vs Forget-MI có kiểm soát, hai bên phải đánh giá trên CÙNG
+          các mẫu. Ở đây gọi thẳng `data_split_advanced` của P3 với cùng seed và cùng tham
+          số chia, nên retain/forget/validation/test là TRÙNG KHỚP mẫu giữa hai phương pháp.
 
-    train_labels = {}
-    train_img_txt_ids = {}
-    test_labels = {}
-    test_img_txt_ids = {}
-    rand_labels = {}
-    rand_img_txt_ids = {}
-    forget_labels = {}
-    forget_img_txt_ids = {}
+    Ánh xạ sang tên biến của baseline:
+      train      ← retain      (D_r dùng để train UR/MR — KHÔNG chứa validation)
+      val        ← r_heldout   (giữ ngoài cập nhật; dùng cho val-CE chọn checkpoint)
+      test       ← test_final  (75% test, CHỈ dùng đánh giá cuối)
+      forget     ← forget      (D_f)
+      rand       ← random      (bản nhiễu của D_f)
+      sel        ← sel         (25% test, og-unseen — D_nm_val cho selector S1–S4)
 
-    with open(split_list_path, 'r') as train_label_file:
-        forget_ids = pd.read_csv(forget_ids_path)
-        forget_ids = forget_ids.astype(str)
-        forget_ids = forget_ids.subject_id.values
+    ĐÂY CHỈ LÀ PROTOCOL DỮ LIỆU/ĐÁNH GIÁ, không phải thành phần phương pháp: baseline vẫn
+    là Forget-MI full fine-tuning, không có Fisher/FILA/LoRA/IHL.
 
-        train_label_file_reader = csv.reader(train_label_file)
-        header = next(train_label_file_reader)
-        ix = {str(n).strip().lower(): i for i, n in enumerate(header)}   # đọc theo TÊN cột (bền IU đổi thứ tự)
-        i_sub = ix.get('subject_id', 0); i_key = ix.get('dicom_id', 2)   # key = dicom_id (ảnh)
-        i_val = ix.get('study_id', ix.get('report_id', 1))              # value = study/text id
-        i_lab = ix.get('edeme_severity', ix.get('label', ix.get('severity', 3)))
-        i_spl = ix.get('fold', ix.get('split', len(header) - 1))
+    rand_ratio / validation_ratio giữ trong chữ ký cho tương thích lời gọi cũ nhưng KHÔNG
+    còn được dùng (rand_ratio vốn đã không được dùng ở bản gốc; tỉ lệ validation nay do
+    retain_heldout_splits quyết định)."""
+    from training.adv_common import data_split_advanced
 
-        for row in train_label_file_reader:
-            if len(row) <= max(i_sub, i_key, i_val, i_lab, i_spl):
-                continue
-            try:
-                severity = float(row[i_lab])
-            except ValueError:
-                continue
-            if row[i_sub] in forget_ids:
-                forget_labels[row[i_key]] = [severity]
-                forget_img_txt_ids[row[i_key]] = row[i_val]
+    splits = data_split_advanced(split_list_path, forget_ids_path, seed=int(seed),
+                                 test_sel_splits=int(test_sel_splits),
+                                 retain_heldout_splits=int(retain_heldout_splits))
 
-                rand_labels[row[i_key]] = [severity]
-                rand_img_txt_ids[row[i_key]] = row[i_val]
-            else:
-                if str(row[i_spl]).strip().upper() == 'TEST':
-                    test_labels[row[i_key]] = [severity]
-                    test_img_txt_ids[row[i_key]] = row[i_val]
-                else:
-                    train_labels[row[i_key]] = [severity]
-                    train_img_txt_ids[row[i_key]] = row[i_val]
+    train_img_txt_ids,  train_labels  = splits['retain']
+    val_img_txt_ids,    val_labels    = splits['r_heldout']
+    test_img_txt_ids,   test_labels   = splits['test_final']
+    forget_img_txt_ids, forget_labels = splits['forget']
+    rand_img_txt_ids,   rand_labels   = splits['random']
+    sel_img_txt_ids,    sel_labels    = splits['sel']
 
-    # VALIDATION DATASET
-    train_ids = list(train_img_txt_ids.keys())
-    train_values = list(train_img_txt_ids.values())
-    train_labels_list = list(train_labels.values())
+    # Chốt chặn: validation KHÔNG được nằm trong train (bug của code gốc).
+    leak = set(val_img_txt_ids) & set(train_img_txt_ids)
+    assert not leak, f"Validation bị lẫn vào train ({len(leak)} mẫu) — split sai."
 
-    train_ids, val_ids, train_values, val_values, train_labels_split, val_labels_split = train_test_split(
-        train_ids, train_values, train_labels_list, test_size=validation_ratio, random_state=42, stratify=train_labels_list)
+    n_train, n_val, n_rand, n_test, n_forget = (len(train_img_txt_ids), len(val_img_txt_ids),
+                                                len(rand_img_txt_ids), len(test_img_txt_ids),
+                                                len(forget_img_txt_ids))
 
-    # Add validation labels and images back into training set
-    train_labels.update(dict(zip(val_ids, val_labels_split)))
-    train_img_txt_ids.update(dict(zip(val_ids, val_values)))
+    print(f"Split (protocol chung với P3, seed={seed}): train/retain={n_train} "
+          f"val/r_heldout={n_val} test_final={n_test} forget={n_forget} random={n_rand} "
+          f"sel/D_nm_val={len(sel_img_txt_ids)}")
 
-    val_labels = dict(zip(val_ids, val_labels_split))
-    val_img_txt_ids = dict(zip(val_ids, val_values))
-
-    train_labels.update(val_labels)
-    train_img_txt_ids.update(val_img_txt_ids)
-
-    n_train, n_val, n_rand, n_test, n_forget = len(train_img_txt_ids), len(val_img_txt_ids), len(rand_img_txt_ids), len(test_img_txt_ids), len(forget_img_txt_ids)
-
-    print(f"Split: train={len(train_labels)} val={len(val_labels)} test={len(test_labels)} forget={len(forget_labels)} random={len(rand_labels)}")
-
-    return train_labels, train_img_txt_ids, val_labels, val_img_txt_ids, test_labels, test_img_txt_ids, rand_labels, rand_img_txt_ids, forget_labels, forget_img_txt_ids, n_train, n_val, n_test, n_rand, n_forget
+    # sel trả về ở CUỐI để không đổi thứ tự 15 giá trị cũ (mọi lời gọi hiện có vẫn chạy).
+    return train_labels, train_img_txt_ids, val_labels, val_img_txt_ids, test_labels, test_img_txt_ids, rand_labels, rand_img_txt_ids, forget_labels, forget_img_txt_ids, n_train, n_val, n_test, n_rand, n_forget, sel_labels, sel_img_txt_ids
 
 def get_model_inputs(args, dataset, device):
 
@@ -580,7 +607,13 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
     _ce_sel = None
     if getattr(args, 'ce_selector_out', None):
         from training.ce_selector_pilot import OnlineCESelector
-        _ce_sel = OnlineCESelector(args, dataset, device, out_dir=str(args.ce_selector_out))
+        # Truyền THẲNG sel/test_final của protocol chung với P3. Nếu để selector tự cắt
+        # dataset['test'] thành 25/75 (nhánh make_nmval_tfinal) thì nó sẽ cắt LẠI bên trong
+        # test_final → D_nm_val thành tập CON của tập dùng chấm điểm (rò rỉ) và tập chấm
+        # chỉ còn ~56% test, khác hẳn P3. Truyền sẵn ⇒ S1–S4 hai bên dùng ĐÚNG cùng mẫu.
+        _ce_sel = OnlineCESelector(args, dataset, device, out_dir=str(args.ce_selector_out),
+                                   split_seed=int(getattr(args, 'random_seed', 42)),
+                                   nm_val_ds=dataset['sel'], tfinal_ds=dataset['test'])
 
     for epoch in unlearning_iterator:
         _t_ep = time.time()
@@ -598,6 +631,7 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
                               desc="Retain Set Iteration", disable=True)
 
         steps = 0
+        optimizer.zero_grad()          # bắt đầu tích lũy gradient cho epoch này
         for (forget_batch, rand_batch, retain_batch) in epoch_iterator:
             # ------------------------------------------- GET INPUTS FROM ORIGINAL AND UNLEARNING MODELS -------------------------------------------
             # model_og is FROZEN — wrap in no_grad so autograd doesn't build a graph
@@ -635,8 +669,9 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
             gate_ul_frgt =  Gate(inp1_size = ul_frgt_img_emb.shape[1], inp2_size = ul_frgt_txt_emb.shape[1]).to(device)
             ul_frgt_joint_emb = gate_ul_frgt(ul_frgt_img_emb, ul_frgt_txt_emb)
 
-            gate_og_frgt =  Gate(inp1_size = og_frgt_img_emb.shape[1], inp2_size = og_frgt_img_emb.shape[1]).to(device)
-            og_frgt_joint_emb = gate_ul_frgt(og_frgt_img_emb, og_frgt_img_emb)
+            # (Code gốc còn dựng `og_frgt_joint_emb` bằng gate_ul_frgt(img, img) — dùng nhầm
+            #  gate và truyền ảnh hai lần. Biến này KHÔNG tham gia hàm mất mát nên đây là
+            #  lỗi lập trình chứ không phải thiết kế phương pháp → không sao chép lại.)
 
             gate_og_rand =  Gate(inp1_size = og_rand_img_emb.shape[1], inp2_size = og_rand_txt_emb.shape[1]).to(device)
             og_rand_joint_emb = gate_og_rand(og_rand_img_emb, og_rand_txt_emb)
@@ -644,28 +679,23 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
             gate_og_ret =  Gate(inp1_size = og_ret_img_emb.shape[1], inp2_size = og_ret_txt_emb.shape[1]).to(device)
             og_ret_joint_emb = gate_og_ret(og_ret_img_emb, og_ret_txt_emb)
 
-            # ĐÚNG PAPER: L_UU = -Dist, L_MU = -Dist — đẩy F_ul(D_f clean) RA XA F_og(D̃_f noisy).
-            # (Code gốc để +distance ở nhánh use_noise -> KÉO lại gần, sai Eq paper. Đã sửa.)
-            if args.use_noise:
-                # ------------------------------------------- UU Loss -------------------------------------------
-                ul_frgt_concat_emb = torch.cat((ul_frgt_img_emb, ul_frgt_txt_emb), dim=-1)
-                og_rand_concat_emb = torch.cat((og_rand_img_emb, og_rand_txt_emb), dim=-1)
+            # ------------------------------------------- UU / MD Loss -------------------------------------------
+            # ĐÚNG PAPER Eq.(1)-(2): L_UU = −Dist, L_MU = −Dist — đẩy F_ul(D_f) RA XA biểu
+            # diễn mà F_og tạo trên BẢN NHIỄU (Ĩ_f, T̃_f).
+            #
+            # Code gốc có if/else theo `use_noise` chỉ để ĐỔI DẤU (use_noise=true → +Dist,
+            # tức kéo LẠI GẦN — trái phương trình paper). Sau khi cả hai nhánh về −Dist thì
+            # if/else thành nhánh chết, nên gộp lại làm một.
+            #
+            # LƯU Ý: `use_noise` KHÔNG điều khiển việc tập tham chiếu có nhiễu hay không.
+            # Trong Forget-MI (cả bản gốc lẫn bản này), rand_dataset LUÔN là bản nhiễu
+            # (perturb_img=True + noisy_txt, xem build_dataset) → cờ này hiện không còn
+            # ảnh hưởng gì tới hàm mất mát.
+            ul_frgt_concat_emb = torch.cat((ul_frgt_img_emb, ul_frgt_txt_emb), dim=-1)
+            og_rand_concat_emb = torch.cat((og_rand_img_emb, og_rand_txt_emb), dim=-1)
 
-                L_uu = -euclidean_distance(ul_frgt_concat_emb, og_rand_concat_emb).mean()
-
-                # ------------------------------------------- MD Loss -------------------------------------------
-                L_md = -euclidean_distance(ul_frgt_joint_emb, og_rand_joint_emb).mean()
-            # don't use any noise, maximization problem
-            else:
-                # ------------------------------------------- UU Loss -------------------------------------------
-                ul_frgt_concat_emb = torch.cat((ul_frgt_img_emb, ul_frgt_txt_emb), dim=-1)
-                og_rand_concat_emb = torch.cat((og_rand_img_emb, og_rand_txt_emb), dim=-1)
-
-                L_uu = (euclidean_distance(ul_frgt_concat_emb, og_rand_concat_emb).mean())
-                L_uu = -L_uu
-                # ------------------------------------------- MD Loss -------------------------------------------
-                L_md = euclidean_distance(ul_frgt_joint_emb, og_rand_joint_emb).mean()
-                L_md = -L_md
+            L_uu = -euclidean_distance(ul_frgt_concat_emb, og_rand_concat_emb).mean()
+            L_md = -euclidean_distance(ul_frgt_joint_emb, og_rand_joint_emb).mean()
 
             # ------------------------------------------- UKR Loss -------------------------------------------
             ul_ret_concat_emb = torch.cat((ul_ret_img_emb, ul_ret_txt_emb), dim=-1)
@@ -676,14 +706,10 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
             # ------------------------------------------- MKR Loss -------------------------------------------
             L_mkr = euclidean_distance(ul_ret_joint_emb, og_ret_joint_emb).mean()
 
-            # ------------------------------------------- Hinge Loss -------------------------------------------
-            if epoch == 0:
-                margin_ukr = (L_ukr + 1).detach() 
-                margin_mkr = (L_mkr + 1).detach()
-
-            if epoch != 0:
-                L_ukr = torch.minimum(L_ukr, margin_ukr)
-                L_mkr = torch.minimum(L_mkr, margin_mkr)
+            # ĐÚNG PAPER Eq.(3)-(4): UR/MR là khoảng cách Euclid THUẦN, KHÔNG cap.
+            # (Code gốc đo margin=(L+1) ở epoch 0 rồi torch.minimum(L, margin) từ epoch sau
+            #  → gradient triệt tiêu khi độ lệch vượt margin, không có trong phương trình
+            #  paper. Đã bỏ hoàn toàn margin_ukr/margin_mkr; KHÔNG thay bằng cơ chế khác.)
 
             # ------------------------------------------- Total Loss -------------------------------------------
             loss = (alpha*L_ukr + beta*L_uu) + (theta*L_md + gamma*L_mkr)
@@ -694,19 +720,24 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
             mkr_loss += L_mkr.item()
             ukr_loss += L_ukr.item()
             total_loss += loss.item()
-            
-            if epoch != 0:
-                loss.backward()
 
-                if 'grad' in optimizer_grouped_parameters:
-                    torch.nn.utils.clip_grad_norm_(optimizer_grouped_parameters, 
-                                                args.max_grad_norm)
+            # Gradient TÍCH LŨY qua các batch trong epoch (cadence của code gốc Forget-MI:
+            # optimizer.step() nằm NGOÀI vòng batch). Backward chạy từ epoch ĐẦU TIÊN —
+            # ngoại lệ "epoch 0 chỉ để đo margin, không cập nhật" đã mất lý do tồn tại
+            # sau khi retention margin bị bỏ theo Eq.(3)-(4). Với 30 epoch → 30 lần cập nhật.
+            loss.backward()
 
             steps += 1
 
-        if epoch != 0:
-            optimizer.step()
-            optimizer.zero_grad()
+        # ----- cuối epoch: clip (nếu bật) rồi cập nhật MỘT lần -----
+        # LƯU Ý: điều kiện dưới đây giữ NGUYÊN như code gốc và thực tế luôn False
+        # (optimizer_grouped_parameters là list các dict) → bản gốc KHÔNG clip. Giữ nguyên
+        # để không tự ý thêm một cơ chế mà Forget-MI không dùng.
+        if 'grad' in optimizer_grouped_parameters:
+            torch.nn.utils.clip_grad_norm_(optimizer_grouped_parameters,
+                                           args.max_grad_norm)
+        optimizer.step()
+        optimizer.zero_grad()
         epoch_train_s = time.time() - _t_ep
         t_train += epoch_train_s
 
@@ -725,8 +756,8 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
             ).mean())
             if was_training:
                 model_ul.train()
-            # Epoch 0 calibrates margins and does not update model weights.
-            if epoch > 0 and last_val_ce < best_val_ce - selection_min_delta:
+            # Mọi epoch (kể cả epoch 0) đều đã cập nhật trọng số → đều là ứng viên hợp lệ.
+            if last_val_ce < best_val_ce - selection_min_delta:
                 best_val_ce = last_val_ce
                 best_epoch = epoch
                 is_best_so_far = True
@@ -782,7 +813,8 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
                 'seed': int(getattr(args, 'random_seed', 0)),
                 'forget_pct': os.path.basename(args.forget_set_path),
                 'epoch': int(epoch + 1),
-                'optimizer_update': int(epoch > 0),
+                # Sau khi bỏ ngoại lệ epoch 0 (đo margin), MỌI epoch đều có 1 lần cập nhật.
+                'optimizer_update': 1,
                 'val_ce': last_val_ce,
                 'is_best_so_far': int(is_best_so_far),
                 'best_epoch_so_far': (int(best_epoch + 1) if best_epoch is not None else ''),
@@ -865,7 +897,9 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
               'best_epoch': best_epoch, 'last_epoch': last_epoch,
               'best_val_ce': best_val_ce, 'last_val_ce': last_val_ce,
               'training_passes': max(last_epoch + 1, 0),
-              'update_epochs': max(last_epoch, 0)}
+              # MỌI epoch đều cập nhật (ngoại lệ epoch 0 đã bỏ) → update_epochs = số epoch,
+              # bằng training_passes. Trước đây trừ 1 vì epoch 0 chỉ đo margin.
+              'update_epochs': max(last_epoch + 1, 0)}
     try:
         wandb.log({"time(hours)": wall_h, "time/train_h": timing['train_h'],
                    "time/monitor_h": timing['monitor_h']})
@@ -1182,9 +1216,11 @@ def main():
         pass
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = (f"{alpha}_UKR_{beta}_UU_{gamma}_MD_{theta}_MKR_"
+    # Khớp ĐÚNG hàm mất mát: loss = alpha*L_ukr + beta*L_uu + theta*L_md + gamma*L_mkr
+    # (trước đây tên run gán nhầm gamma cho MD và theta cho MKR).
+    run_name = (f"{alpha}_UKR_{beta}_UU_{theta}_MD_{gamma}_MKR_"
                 f"mean{config.noise_mean}_std{config.noise_std}_{config.use_noise}_"
-                f"{timestamp}_partials_hinge_euc")
+                f"{timestamp}_partials_euc")   # bỏ hậu tố 'hinge': UR/MR không còn cap
     try:
         wandb.run.name = run_name
     except Exception:
