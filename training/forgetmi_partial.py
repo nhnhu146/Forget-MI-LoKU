@@ -582,9 +582,24 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
     model_og.train()
 
     unlearning_start_time = time.time()
-    # Bóc tách thời gian: train thuần (forward/backward/step) vs monitor (CosSim per-epoch,
-    # CHỈ để log — không cần cho unlearning) vs ckpt (I/O lưu checkpoint mỗi epoch).
-    t_train = t_monitor = t_ckpt = 0.0
+    # Bóc tách thời gian theo CÙNG chuẩn với P3 (adv_common.CudaTimer, đồng bộ CUDA):
+    #   T_core(Forget-MI) = T_train   (không có Fisher/FILA)
+    #   T_selection       = val-CE + CE-selector  (giao thức, KHÔNG vào core)
+    #   monitor/ckpt      = CosSim log + I/O, cũng không vào core
+    from training.adv_common import CudaTimer, reset_gpu_peak, get_gpu_peak, _stat
+    t_train = t_monitor = t_ckpt = t_selection = 0.0
+    epoch_train_times = []
+    tm_peaks = {}
+    peak_train = peak_sel = (0.0, 0.0)
+    # warm-up: loại chi phí khởi tạo CUDA khỏi phép đo (không đổi checkpoint/dữ liệu)
+    try:
+        _wb = next(iter(DataLoader(dataset['forget'], batch_size=2)))
+        with torch.no_grad():
+            _wi, _, _ = get_model_inputs(args, _wb, device)
+            model_og(**_wi)
+        del _wb, _wi
+    except Exception as _e:
+        print(f"   (bỏ qua warm-up: {_e})")
 
     dual_checkpoint_eval = _as_bool(getattr(args, 'evaluate_last_and_best', False))
     legacy_cossim_monitor = _as_bool(getattr(args, 'legacy_cossim_monitor', True))
@@ -616,7 +631,9 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
                                    nm_val_ds=dataset['sel'], tfinal_ds=dataset['test'])
 
     for epoch in unlearning_iterator:
-        _t_ep = time.time()
+        # T_train của epoch: CHỈ forward/backward/step, đồng bộ CUDA hai đầu.
+        reset_gpu_peak()
+        _tt = CudaTimer(); _tt.__enter__()
         model_ul.train()
         # ------------------------------------------- UNLEARNING -------------------------------------------
         total_loss = 0
@@ -631,7 +648,7 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
                               desc="Retain Set Iteration", disable=True)
 
         steps = 0
-        optimizer.zero_grad()          # bắt đầu tích lũy gradient cho epoch này
+        optimizer.zero_grad(set_to_none=True)   # bắt đầu tích lũy gradient cho epoch này
         for (forget_batch, rand_batch, retain_batch) in epoch_iterator:
             # ------------------------------------------- GET INPUTS FROM ORIGINAL AND UNLEARNING MODELS -------------------------------------------
             # model_og is FROZEN — wrap in no_grad so autograd doesn't build a graph
@@ -737,9 +754,12 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
             torch.nn.utils.clip_grad_norm_(optimizer_grouped_parameters,
                                            args.max_grad_norm)
         optimizer.step()
-        optimizer.zero_grad()
-        epoch_train_s = time.time() - _t_ep
+        optimizer.zero_grad(set_to_none=True)
+        _tt.__exit__(None, None, None)
+        epoch_train_s = _tt.elapsed
+        epoch_train_times.append(epoch_train_s)
         t_train += epoch_train_s
+        peak_train = tuple(max(a, b) for a, b in zip(peak_train, get_gpu_peak()))
 
         # ----- Per-epoch CosSim eval (FAITHFUL to original Forget-MI implementation) -----
         # Runs FULL retain forward through model_ul AND model_re each epoch. Chỉ để LOG
@@ -749,11 +769,16 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
         last_val_ce = float('nan')
         is_best_so_far = False
         if dual_checkpoint_eval:
+            # val-CE là GIAO THỨC chọn checkpoint → tính vào T_selection, không vào T_core.
             from training.forgetmi_loku import per_sample_ce
+            reset_gpu_peak()
             was_training = model_ul.training
-            last_val_ce = float(per_sample_ce(
-                model_ul, val_selection_set, device, args, args.eval_batch_size
-            ).mean())
+            with CudaTimer() as _tsel:
+                last_val_ce = float(per_sample_ce(
+                    model_ul, val_selection_set, device, args, args.eval_batch_size
+                ).mean())
+            t_selection += _tsel.elapsed
+            peak_sel = tuple(max(a, b) for a, b in zip(peak_sel, get_gpu_peak()))
             if was_training:
                 model_ul.train()
             # Mọi epoch (kể cả epoch 0) đều đã cập nhật trọng số → đều là ứng viên hợp lệ.
@@ -856,11 +881,15 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
 
         # ----- CE-crossing selector: eval CE + snapshot ứng viên epoch này (gold-free) -----
         if _ce_sel is not None:
-            _ce_sel.step(epoch, model_ul)
+            with CudaTimer() as _tcs:
+                _ce_sel.step(epoch, model_ul)
+            t_selection += _tcs.elapsed     # giao thức, KHÔNG vào T_core
 
     # sau vòng lặp: chọn epoch theo 4 cách + eval selected trên D_t_final (gold-free)
     if _ce_sel is not None:
-        _ce_sel.finalize(model_ul)
+        with CudaTimer() as _tcf:
+            _ce_sel.finalize(model_ul)
+        t_selection += _tcf.elapsed
 
     checkpoint_dir = None
     best_checkpoint = None
@@ -891,8 +920,22 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
 
     # ------------------------------------------- Timing breakdown -------------------------------------------
     wall_h = (time.time() - unlearning_start_time) / 3600
+    tm_peaks['train'] = peak_train
+    tm_peaks['selection'] = peak_sel
+    _est = _stat(epoch_train_times)
+    print(f"⏱  T_train = {t_train:.1f}s ({t_train/3600:.4f}h) · epoch: mean {_est['mean']:.2f}s "
+          f"± {_est['std']:.2f} (min {_est['min']:.2f} / max {_est['max']:.2f})")
+    print(f"⏱  T_selection = {t_selection:.1f}s — giao thức chọn checkpoint, KHÔNG vào core")
+    print(f"⏱  monitor(CosSim log) {t_monitor:.1f}s · ckpt I/O {t_ckpt:.1f}s — cũng không vào core")
     timing = {'train_h': t_train / 3600, 'monitor_h': t_monitor / 3600,
               'ckpt_h': t_ckpt / 3600, 'wall_h': wall_h,
+              # ---- chuẩn đo dùng chung với P3: core(FMI) = train (không Fisher/FILA) ----
+              'fisher_seconds': 0.0, 'fila_seconds': 0.0,
+              'train_seconds': float(t_train),
+              'selection_seconds': float(t_selection),
+              'eval_seconds': 0.0,                    # điền sau _final_evaluation
+              'epoch_train_stat': _est, 'peaks': tm_peaks,
+              'optimizer_updates': max(last_epoch + 1, 0),
               'best_checkpoint': best_checkpoint, 'last_checkpoint': last_checkpoint,
               'best_epoch': best_epoch, 'last_epoch': last_epoch,
               'best_val_ce': best_val_ce, 'last_val_ce': last_val_ce,
@@ -1346,6 +1389,11 @@ def main():
         row_extra={'gold_retrained_available': gold_retrained_available},
         csv_path=getattr(config, 'results_csv_path', None),
     )
+    # T_eval: đánh giá cuối (last + val_best) — GIAO THỨC, không vào T_core.
+    from training.adv_common import (CudaTimer as _CT, reset_gpu_peak as _rp,
+                                     get_gpu_peak as _gp, save_timing_json as _sj)
+    _rp()
+    _tev = _CT(); _tev.__enter__()
     _final_evaluation(
         model_unlearn=model_unlearn, tracker=None if dual_checkpoint_eval else tracker,
         checkpoint_kind='last', selected_epoch=(timing.get('last_epoch', -1) + 1),
@@ -1367,6 +1415,21 @@ def main():
             selection_value=best_val_ce, finalize_tracker=True,
             **common_eval,
         )
+
+    # ---- chốt T_eval + ghi timing_result.json (cùng chuẩn với P3) ----
+    _tev.__exit__(None, None, None)
+    timing['eval_seconds'] = _tev.elapsed
+    timing.setdefault('peaks', {})['eval'] = _gp()
+    print(f"⏱  T_eval = {_tev.elapsed:.1f}s ({_tev.elapsed/3600:.4f}h) — giao thức, KHÔNG vào core")
+    _rid = str(getattr(config, 'id', 'forgetmi'))
+    _sj(os.path.join(output_dir, f'timing_baseline_partial_{_rid}.json'),
+        'baseline_partial', config, timing, trainable, total_params,
+        extra={'run_id': _rid,
+               'core_definition': 'T_core(Forget-MI) = T_train (khong co Fisher/FILA)',
+               'monitor_seconds': float(timing.get('monitor_h', 0.0)) * 3600,
+               'ckpt_io_seconds': float(timing.get('ckpt_h', 0.0)) * 3600,
+               'best_epoch': timing.get('best_epoch'),
+               'last_epoch': timing.get('last_epoch')})
 
     # ---- Post-eval cleanup ----
     # Per-epoch checkpoints (~450MB × 30 = 13.5GB) would otherwise fill Kaggle's 20GB

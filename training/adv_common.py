@@ -61,6 +61,7 @@ phải nói rõ đây là đánh giá privacy dựa trên nhánh ảnh, chưa đ
 import os
 import sys
 import csv
+import time
 import random
 from functools import reduce
 
@@ -88,6 +89,129 @@ from joint_img_txt.convert_examples_to_features import (
 # ============================================================================
 # Utilities cơ bản (sao y forgetmi_loku.py — đã kiểm chứng)
 # ============================================================================
+
+# ============================================================================
+# ĐO THỜI GIAN / BỘ NHỚ — chuẩn chung cho CẢ Forget-MI baseline lẫn P3
+# ----------------------------------------------------------------------------
+# GPU chạy bất đồng bộ: nếu không torch.cuda.synchronize() trước và sau đoạn đo
+# thì time.perf_counter() chỉ đo thời gian ENQUEUE kernel, không phải thời gian
+# chạy thật. Mọi phép đo thời gian dưới đây đều đồng bộ hai đầu.
+#
+# Quy ước tách bạch (không được gộp):
+#   T_core(Forget-MI) = T_train
+#   T_core(P3)        = T_fisher + T_fila + T_train
+#   T_pipeline        = T_core + T_selection + T_eval
+# Chọn checkpoint và đánh giá cuối là thành phần của GIAO THỨC THỰC NGHIỆM,
+# không phải của thuật toán gỡ bỏ → đo riêng, không cộng vào T_core.
+# ============================================================================
+
+class CudaTimer:
+    """Đo thời gian có đồng bộ CUDA hai đầu. Dùng: `with CudaTimer() as t: ...`"""
+    def __init__(self):
+        self.elapsed = 0.0
+
+    def __enter__(self):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self.start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc_value, tb):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self.elapsed = time.perf_counter() - self.start
+        return False
+
+
+def reset_gpu_peak():
+    """Xóa mốc peak để đo peak của RIÊNG giai đoạn tiếp theo."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
+
+
+def get_gpu_peak():
+    """Trả (allocated_GB, reserved_GB) kể từ lần reset_gpu_peak() gần nhất."""
+    if not torch.cuda.is_available():
+        return (0.0, 0.0)
+    torch.cuda.synchronize()
+    return (torch.cuda.max_memory_allocated() / 1024 ** 3,
+            torch.cuda.max_memory_reserved() / 1024 ** 3)
+
+
+def _stat(xs):
+    """mean/std/min/max của list thời gian (giây). Rỗng → toàn 0."""
+    if not xs:
+        return {'mean': 0.0, 'std': 0.0, 'min': 0.0, 'max': 0.0, 'n': 0}
+    a = np.asarray(xs, dtype=float)
+    return {'mean': float(a.mean()), 'std': float(a.std(ddof=0)),
+            'min': float(a.min()), 'max': float(a.max()), 'n': int(a.size)}
+
+
+def save_timing_json(path, method, cfg, timing, trainable, total, extra=None):
+    """Ghi timing_result.json theo đúng cấu trúc yêu cầu (mục 14–15 của hướng dẫn).
+    core = fisher + fila + train; pipeline = core + selection + eval.
+    GPU peak lấy MAX giữa các giai đoạn của core, KHÔNG cộng dồn."""
+    import json
+    from datetime import datetime
+    fisher_s = float(timing.get('fisher_seconds', 0.0))
+    fila_s = float(timing.get('fila_seconds', 0.0))
+    train_s = float(timing.get('train_seconds', 0.0))
+    sel_s = float(timing.get('selection_seconds', 0.0))
+    ev_s = float(timing.get('eval_seconds', 0.0))
+    core_s = fisher_s + fila_s + train_s
+    peaks = timing.get('peaks', {})
+    core_alloc = max([peaks.get(k, (0.0, 0.0))[0] for k in ('fisher', 'fila', 'train')] or [0.0])
+    core_resv = max([peaks.get(k, (0.0, 0.0))[1] for k in ('fisher', 'fila', 'train')] or [0.0])
+    res = {
+        'method': method,
+        'dataset': os.path.basename(str(getattr(cfg, 'data_split_path', ''))),
+        'forget_pct': os.path.basename(str(getattr(cfg, 'forget_set_path', ''))),
+        'seed': int(getattr(cfg, 'random_seed', 0)),
+        'epochs': int(getattr(cfg, 'unlearn_epochs', 0)),
+        'optimizer_updates': int(timing.get('optimizer_updates', 0)),
+        'batch_size': int(getattr(cfg, 'unlearn_batch_size', 0)),
+        'learning_rate': float(getattr(cfg, 'learning_rate', 0.0)),
+        'grad_accumulation': 'per-epoch (tích lũy toàn bộ batch trong epoch)',
+        'amp': 'model_ul fp32; model_og/model_re fp16 (chỉ forward tham chiếu)',
+        'lora_r': int(getattr(cfg, 'lora_r', 0)),
+        'gate_mode': str(getattr(cfg, 'gate_mode', 'per_batch')),
+        'gpu_name': (torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'),
+        'cuda_version': getattr(torch.version, 'cuda', None),
+        'torch_version': torch.__version__,
+        'fisher_seconds': fisher_s,
+        'fila_seconds': fila_s,
+        'train_seconds': train_s,
+        'core_seconds': core_s,
+        'selection_seconds': sel_s,
+        'eval_seconds': ev_s,
+        'pipeline_seconds': core_s + sel_s + ev_s,
+        'epoch_train_seconds': timing.get('epoch_train_stat', _stat([])),
+        'trainable_params': int(trainable),
+        'total_params': int(total),
+        'trainable_ratio': float(trainable) / max(1, int(total)),
+        'peak_allocated_gb': {k: round(v[0], 3) for k, v in peaks.items()},
+        'peak_reserved_gb': {k: round(v[1], 3) for k, v in peaks.items()},
+        'core_peak_allocated_gb': core_alloc,
+        'core_peak_reserved_gb': core_resv,
+        'timing_runs': 1,
+        'note': 'single-run timing',
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    if extra:
+        res.update(extra)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as fh:
+        json.dump(res, fh, indent=2, ensure_ascii=False)
+    print(f"⏱  timing JSON: {path}")
+    print(f"   core {core_s/3600:.4f}h = fisher {fisher_s/3600:.4f} + fila {fila_s/3600:.4f} "
+          f"+ train {train_s/3600:.4f}  |  selection {sel_s/3600:.4f}h  eval {ev_s/3600:.4f}h")
+    print(f"   peak alloc (GB): {res['peak_allocated_gb']}  → core {core_alloc:.2f}")
+    return res
+
 
 def set_seed(seed: int):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
@@ -1500,16 +1624,32 @@ def setup_experiment(cfg, device, rank_alloc_fn=None):
         target_modules = target_modules + image_targets
     ctx['image_targets'] = image_targets
 
-    _t = _time.time()
+    # ----- warm-up (không đổi checkpoint/dữ liệu): loại chi phí khởi tạo CUDA khỏi phép đo -----
+    try:
+        _wb = next(iter(DataLoader(datasets['forget'], batch_size=2)))
+        with torch.no_grad():
+            _wi, _, _ = get_model_inputs(cfg, _wb, device)
+            safe_forward(ctx['model_og'], _wi)
+        del _wb, _wi
+    except Exception as _e:
+        print(f"   (bỏ qua warm-up: {_e})")
+    ctx['peaks'] = {}
+
+    # ----- T_fisher (đo riêng, có đồng bộ CUDA) -----
     print(f"🎯 LoRA targets (trước phân rank): {target_modules}")
     fisher_bs = int(getattr(cfg, 'fisher_batch_size', cfg.unlearn_batch_size))
     fisher_n = int(getattr(cfg, 'fisher_max_samples', 256))
-    f_imp = compute_fisher_importance(ctx['model_og'],
-        DataLoader(datasets['forget'], batch_size=fisher_bs), device, target_modules, cfg, fisher_n)
-    r_imp = compute_fisher_importance(ctx['model_og'],
-        DataLoader(datasets['retain'], batch_size=fisher_bs), device, target_modules, cfg, fisher_n)
-    ctx['fisher_h'] = (_time.time() - _t) / 3600
+    reset_gpu_peak()
+    with CudaTimer() as _tf:
+        f_imp = compute_fisher_importance(ctx['model_og'],
+            DataLoader(datasets['forget'], batch_size=fisher_bs), device, target_modules, cfg, fisher_n)
+        r_imp = compute_fisher_importance(ctx['model_og'],
+            DataLoader(datasets['retain'], batch_size=fisher_bs), device, target_modules, cfg, fisher_n)
+    ctx['fisher_seconds'] = _tf.elapsed
+    ctx['peaks']['fisher'] = get_gpu_peak()
+    ctx['fisher_h'] = _tf.elapsed / 3600            # giữ khóa cũ cho CSV/notebook
     ctx['f_imp'], ctx['r_imp'] = f_imp, r_imp
+    print(f"⏱  T_fisher = {_tf.elapsed:.1f}s  (peak alloc {ctx['peaks']['fisher'][0]:.2f} GB)")
 
     rank_pattern = alpha_pattern = None
     if rank_alloc_fn is not None:
@@ -1522,22 +1662,29 @@ def setup_experiment(cfg, device, rank_alloc_fn=None):
     del ctx['model_og']; torch.cuda.empty_cache()
     ctx['model_og'] = reload_og_fp16(ctx['base_p'], device)
 
-    model, peft_cfg = build_peft(ctx['model_unlearn'], cfg, target_modules,
-                                 rank_pattern=rank_pattern, alpha_pattern=alpha_pattern)
-    ctx['peft_cfg'] = peft_cfg
+    # ----- T_fila: gắn adapter + row importance + weighted SVD + tạo A/B + bù PEFT scaling
+    #       + cập nhật W*  (đo riêng, có đồng bộ CUDA) -----
     img_sub = float(getattr(cfg, 'loku_image_subtract_scale',
                             getattr(cfg, 'loku_subtract_scale', 0.0)))
     fila_subtraction = {}
-    if getattr(cfg, 'loku_random_init', False):
-        print("🎲 ABLATION: loku_random_init=True → BỎ Fisher/FILA init")
-    else:
-        fila_subtraction = apply_loku_soft_init(model, f_imp, r_imp, target_modules,
-            r=int(cfg.lora_r), init_scale=float(getattr(cfg, 'loku_init_scale', 0.05)),
-            subtract_scale=float(getattr(cfg, 'loku_subtract_scale', 0.0)),
-            image_target_names=set(image_targets), image_subtract_scale=img_sub,
-            rank_pattern=rank_pattern)
-    # LoKU Sec. 3.5: pretrained frozen, chỉ A,B được cập nhật (classifier heads ĐÓNG BĂNG)
-    enforce_lora_only(model)
+    reset_gpu_peak()
+    with CudaTimer() as _tl:
+        model, peft_cfg = build_peft(ctx['model_unlearn'], cfg, target_modules,
+                                     rank_pattern=rank_pattern, alpha_pattern=alpha_pattern)
+        if getattr(cfg, 'loku_random_init', False):
+            print("🎲 ABLATION: loku_random_init=True → BỎ Fisher/FILA init")
+        else:
+            fila_subtraction = apply_loku_soft_init(model, f_imp, r_imp, target_modules,
+                r=int(cfg.lora_r), init_scale=float(getattr(cfg, 'loku_init_scale', 0.05)),
+                subtract_scale=float(getattr(cfg, 'loku_subtract_scale', 0.0)),
+                image_target_names=set(image_targets), image_subtract_scale=img_sub,
+                rank_pattern=rank_pattern)
+        # LoKU Sec. 3.5: pretrained frozen, chỉ A,B được cập nhật (classifier heads ĐÓNG BĂNG)
+        enforce_lora_only(model)
+    ctx['fila_seconds'] = _tl.elapsed
+    ctx['peaks']['fila'] = get_gpu_peak()
+    print(f"⏱  T_fila = {_tl.elapsed:.1f}s  (peak alloc {ctx['peaks']['fila'][0]:.2f} GB)")
+    ctx['peft_cfg'] = peft_cfg
     ctx['fila_subtraction'] = fila_subtraction
     ctx['model_unlearn'] = model
     ctx['trainable'], ctx['total'] = count_params(model)
@@ -1662,6 +1809,10 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
     grad_clip = float(getattr(cfg, 'grad_clip', 1.0))
     history_csv = getattr(cfg, 'history_csv_path', None)
     trainable_params = [p for p in model_ul.parameters() if p.requires_grad]   # chỉ LoRA
+    # T_train và T_selection đo TÁCH BẠCH, mỗi khoảng có đồng bộ CUDA hai đầu.
+    epoch_train_s = []
+    peaks = ctx.setdefault('peaks', {})
+    peak_train = peak_sel = (0.0, 0.0)
 
     best = {'s_val': 1e9, 'sel_value': 1e9, 'select_by': select_by,
             'epoch': None, 'state': None, 'metrics': None}
@@ -1685,7 +1836,6 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
             load_fn=lambda m, s: m.load_state_dict(s, strict=False))
 
     for epoch in range(int(cfg.unlearn_epochs)):
-        _t = _time.time()
         model_ul.train()
         _nbn = set_bn_eval(model_ul)     # BN giữ eval (running-stats) — đúng chuẩn LoRA base đóng băng
         if epoch == 0:
@@ -1695,7 +1845,10 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
         n_batches = max(1, int(ctx.get('forget_batches', 1)))
         n_ep = max(1, int(cfg.unlearn_epochs))
         agg = {}; steps = 0
-        optimizer.zero_grad()                 # gradient TÍCH LŨY suốt epoch
+        # ---- T_train của epoch: CHỈ forward/backward/step, KHÔNG gồm selector ----
+        reset_gpu_peak()
+        _tt = CudaTimer(); _tt.__enter__()
+        optimizer.zero_grad(set_to_none=True)   # gradient TÍCH LŨY suốt epoch
         for bi, (fb, rb, retb) in enumerate(zip(ctx['forget_dl'], ctx['rand_dl'], retain_dl)):
             # tiến trình mượt trong epoch để lịch trọng số của P5 không bị bậc thang
             global_frac = min(1.0, (epoch + bi / n_batches) / n_ep)
@@ -1710,18 +1863,24 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
         if grad_clip and trainable_params:
             torch.nn.utils.clip_grad_norm_(trainable_params, grad_clip)
         optimizer.step()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         sched.batch_step()
         total_steps += 1
         avg = {k: v / max(steps, 1) for k, v in agg.items()}
-        t_train += _time.time() - _t
+        _tt.__exit__(None, None, None)
+        epoch_train_s.append(_tt.elapsed)
+        t_train += _tt.elapsed
+        peak_train = tuple(max(a, b) for a, b in zip(peak_train, get_gpu_peak()))
 
-        _t = _time.time()
-        S = selection_metrics(model_ul, ctx['model_og'], datasets,
-                              ctx['forget_dl'], ctx['rand_dl'], ctx['ref_scales'],
-                              ctx['og_perf'], cfg, device, ctx=ctx)
-        sched.epoch_step(S['S_val'])
-        t_sel += _time.time() - _t
+        # ---- T_selection: giao thức chọn checkpoint, KHÔNG tính vào T_core ----
+        reset_gpu_peak()
+        with CudaTimer() as _ts:
+            S = selection_metrics(model_ul, ctx['model_og'], datasets,
+                                  ctx['forget_dl'], ctx['rand_dl'], ctx['ref_scales'],
+                                  ctx['og_perf'], cfg, device, ctx=ctx)
+            sched.epoch_step(S['S_val'])
+        t_sel += _ts.elapsed
+        peak_sel = tuple(max(a, b) for a, b in zip(peak_sel, get_gpu_peak()))
 
         d_u0, d_m0 = ctx['ref_scales']
         print(f"[{method} E{epoch:02d}] loss={avg.get('Total', 0):+.3f} "
@@ -1734,10 +1893,10 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
 
         # ---- 'CHỌN EPOCH TỐT NHẤT': eval mỗi epoch trên D_t_final (như tái lập Forget-MI) ----
         if as_bool(getattr(cfg, 'eval_test_every_epoch', False)):
-            _t2 = _time.time()
-            te = eval_on_test_final(model_ul, ctx['model_re'], datasets, cfg, device,
-                                    light=as_bool(getattr(cfg, 'eval_test_light', True)))
-            t_sel += _time.time() - _t2
+            with CudaTimer() as _t2:
+                te = eval_on_test_final(model_ul, ctx['model_re'], datasets, cfg, device,
+                                        light=as_bool(getattr(cfg, 'eval_test_light', True)))
+            t_sel += _t2.elapsed
             print(f"    📊 [test E{epoch:02d}] Df-AUC {te['Df_AUC']:.3f} Df-F1 {te['Df_F1']:.3f}  "
                   f"Dt-AUC {te['Dt_AUC']:.3f} Dt-F1 {te['Dt_F1']:.3f}  "
                   f"MIA {te['MIA']:.3f}/{te['MIA_paper']:.3f}  "
@@ -1772,11 +1931,15 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
 
         # ----- CE-crossing selector: eval CE + snapshot ứng viên epoch này (gold-free) -----
         if _ce_sel is not None:
-            _ce_sel.step(epoch, model_ul)
+            with CudaTimer() as _t3:
+                _ce_sel.step(epoch, model_ul)
+            t_sel += _t3.elapsed       # thuộc T_selection, không phải T_core
 
     # sau vòng lặp: chọn epoch theo 4 cách + eval selected trên D_t_final (gold-free)
     if _ce_sel is not None:
-        _ce_sel.finalize(model_ul)
+        with CudaTimer() as _t4:
+            _ce_sel.finalize(model_ul)
+        t_sel += _t4.elapsed
 
     if best['epoch'] is not None:
         cp = os.path.join(ctx['out_dir'], 'checkpoints')
@@ -1785,9 +1948,29 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
                     's_val': best['s_val']},
                    os.path.join(cp, 'selected.pt'))
 
-    timing = {'train_h': t_train / 3600, 'sel_h': t_sel / 3600,
-              'wall_h': (_time.time() - wall0) / 3600, 'fisher_h': ctx.get('fisher_h', 0.0),
-              'load_h': ctx.get('load_h', 0.0), 'last_epoch': int(cfg.unlearn_epochs) - 1}
+    peaks['train'] = peak_train
+    peaks['selection'] = peak_sel
+    est = _stat(epoch_train_s)
+    print(f"⏱  T_train = {t_train:.1f}s ({t_train/3600:.4f}h) · epoch: mean {est['mean']:.2f}s "
+          f"± {est['std']:.2f} (min {est['min']:.2f} / max {est['max']:.2f})")
+    print(f"⏱  T_selection = {t_sel:.1f}s ({t_sel/3600:.4f}h) — giao thức, KHÔNG tính vào core")
+    timing = {
+        # ---- khóa mới, theo hướng dẫn đo thời gian ----
+        'fisher_seconds': float(ctx.get('fisher_seconds', 0.0)),
+        'fila_seconds': float(ctx.get('fila_seconds', 0.0)),
+        'train_seconds': float(t_train),
+        'selection_seconds': float(t_sel),
+        'eval_seconds': 0.0,                       # điền ở finalize_and_eval
+        'epoch_train_stat': est,
+        'peaks': peaks,
+        'optimizer_updates': int(total_steps),
+        # ---- khóa cũ (giữ để CSV/notebook không vỡ) ----
+        'train_h': t_train / 3600, 'sel_h': t_sel / 3600,
+        'wall_h': (_time.time() - wall0) / 3600,
+        'fisher_h': ctx.get('fisher_h', 0.0),
+        'load_h': ctx.get('load_h', 0.0),
+        'last_epoch': int(cfg.unlearn_epochs) - 1,
+    }
     return timing, best, total_steps
 
 
@@ -1819,6 +2002,9 @@ def finalize_and_eval(cfg, ctx, device, method, run_id, timing, best, total_step
     extra_row = dict(extra_row or {})
     extra_row.update({'ref_d_u': round(float(ctx['ref_scales'][0]), 4),
                       'ref_d_m': round(float(ctx['ref_scales'][1]), 4)})
+    # T_eval: đánh giá cuối (last + selected) — thành phần GIAO THỨC, không vào T_core.
+    reset_gpu_peak()
+    _te = CudaTimer(); _te.__enter__()
 
     # ---- chữ ký tham chiếu: model SỐNG (base đã có FILA subtraction) ở trạng thái best ----
     ref_probe, probe_ds = None, ctx['datasets']['test_final']
@@ -1859,6 +2045,20 @@ def finalize_and_eval(cfg, ctx, device, method, run_id, timing, best, total_step
             trainable=ctx['trainable'], total=ctx['total'], total_optimizer_steps=total_steps,
             csv_path=csv_path, gold_available=ctx['gold_available'], extra_row=er)
         del sel_model; torch.cuda.empty_cache()
+
+    # ---- chốt T_eval + ghi timing_result.json ----
+    _te.__exit__(None, None, None)
+    timing['eval_seconds'] = _te.elapsed
+    timing.setdefault('peaks', {})['eval'] = get_gpu_peak()
+    print(f"⏱  T_eval = {_te.elapsed:.1f}s ({_te.elapsed/3600:.4f}h) — giao thức, KHÔNG vào core")
+    save_timing_json(os.path.join(ctx['out_dir'], f'timing_{method}_{run_id}.json'),
+                     method, cfg, timing, ctx['trainable'], ctx['total'],
+                     extra={'run_id': run_id,
+                            'selected_epoch': (best['epoch'] + 1) if best['epoch'] is not None else None,
+                            'load_seconds': float(ctx.get('load_h', 0.0)) * 3600,
+                            'lora_target_modules': list(ctx.get('target_modules', [])),
+                            **{k: v for k, v in (extra_row or {}).items()
+                               if isinstance(v, (int, float, str, bool))}})
 
 
 def final_evaluation(merged_model, model_re, datasets, cfg, device, method, run_id,
@@ -1911,7 +2111,11 @@ def final_evaluation(merged_model, model_re, datasets, cfg, device, method, run_
     gpu_peak = (torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0)
     final_eval_h = (_time.time() - t0) / 3600
     t = timing or {}
-    core_h = float(t.get('train_h', 0.0)) + float(t.get('fisher_h', 0.0))
+    # T_core(P3) = T_fisher + T_fila + T_train  (KHÔNG gồm selection/eval)
+    core_h = (float(t.get('fisher_seconds', 0.0)) + float(t.get('fila_seconds', 0.0))
+              + float(t.get('train_seconds', 0.0))) / 3600
+    _pk = t.get('peaks', {})
+    core_peak_alloc = max([_pk.get(k, (0.0, 0.0))[0] for k in ('fisher', 'fila', 'train')] or [0.0])
 
     def _r(x, n=3):
         try:
@@ -1936,6 +2140,19 @@ def final_evaluation(merged_model, model_re, datasets, cfg, device, method, run_
         'unlearn_core_hours': _r(core_h), 'train_hours': _r(t.get('train_h', 0.0)),
         'fisher_hours': _r(t.get('fisher_h', 0.0)), 'wall_hours': _r(t.get('wall_h', 0.0)),
         'final_eval_hours': _r(final_eval_h), 'gpu_peak_GB': _r(gpu_peak, 2),
+        # --- timing tách bạch (đồng bộ CUDA) ---
+        'fisher_seconds': _r(t.get('fisher_seconds', 0.0), 2),
+        'fila_seconds': _r(t.get('fila_seconds', 0.0), 2),
+        'train_seconds': _r(t.get('train_seconds', 0.0), 2),
+        'core_seconds': _r(core_h * 3600, 2),
+        'selection_seconds': _r(t.get('selection_seconds', 0.0), 2),
+        'epoch_train_mean_s': _r(t.get('epoch_train_stat', {}).get('mean', 0.0), 3),
+        'epoch_train_std_s': _r(t.get('epoch_train_stat', {}).get('std', 0.0), 3),
+        'peak_fisher_GB': _r(_pk.get('fisher', (0, 0))[0], 2),
+        'peak_fila_GB': _r(_pk.get('fila', (0, 0))[0], 2),
+        'peak_train_GB': _r(_pk.get('train', (0, 0))[0], 2),
+        'peak_selection_GB': _r(_pk.get('selection', (0, 0))[0], 2),
+        'core_peak_allocated_GB': _r(core_peak_alloc, 2),
         'trainable_params': int(trainable), 'total_params': int(total),
         'trainable_ratio': _r(trainable / max(1, total), 5),
         'total_optimizer_steps': int(total_optimizer_steps),
@@ -1957,7 +2174,13 @@ def final_evaluation(merged_model, model_re, datasets, cfg, device, method, run_
           f"PairAUC {test_m.get('Pairwise_AUC', float('nan')):.3f}  CE {test_ce:.3f}")
     print(f"  MIA     persample {mia['persample']:.3f}(↓)  paper {mia['paper']:.3f}(↓)   "
           f"1−Sim(re) {1 - cossim:.3f}(↓)")
-    print(f"  Time    core {core_h:.3f}h (train {t.get('train_h', 0):.3f}+fisher {t.get('fisher_h', 0):.3f}) "
+    print(f"  Time    core {core_h:.4f}h = fisher {t.get('fisher_seconds',0)/3600:.4f} + "
+          f"fila {t.get('fila_seconds',0)/3600:.4f} + train {t.get('train_seconds',0)/3600:.4f}  |  "
+          f"selection {t.get('selection_seconds',0)/3600:.4f}h (giao thức)")
+    print(f"  Peak    fisher {_pk.get('fisher',(0,0))[0]:.2f} · fila {_pk.get('fila',(0,0))[0]:.2f} · "
+          f"train {_pk.get('train',(0,0))[0]:.2f} · sel {_pk.get('selection',(0,0))[0]:.2f} GB "
+          f"→ CORE {core_peak_alloc:.2f} GB")
+    print(f"  (cũ)    train {t.get('train_h', 0):.3f}h fisher {t.get('fisher_h', 0):.3f}h "
           f"wall {t.get('wall_h', 0):.3f}h  steps {total_optimizer_steps}")
     print(f"  Compute GPU {gpu_peak:.2f}GB  Trainable {trainable:,} ({100*trainable/max(1,total):.2f}%)")
     print("─" * 64)
