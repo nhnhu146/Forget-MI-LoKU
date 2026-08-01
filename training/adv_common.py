@@ -149,6 +149,28 @@ def _stat(xs):
             'min': float(a.min()), 'max': float(a.max()), 'n': int(a.size)}
 
 
+def describe_precision(models):
+    """Đọc dtype THỰC TẾ của từng model → chuỗi metadata precision (mục 15).
+    Không hard-code: hai phương pháp nạp model khác nhau, ghi sai là báo cáo sai."""
+    name_of = {torch.float16: 'fp16', torch.bfloat16: 'bf16', torch.float32: 'fp32'}
+    parts = []
+    for tag, m in models.items():
+        if m is None:
+            continue
+        try:
+            dt = next(m.parameters()).dtype
+        except (StopIteration, AttributeError):
+            continue
+        parts.append(f"{tag}={name_of.get(dt, str(dt))}")
+    return '; '.join(parts) if parts else 'unknown'
+
+
+def dl_pin_memory(cfg):
+    """pin_memory DÙNG CHUNG cho Forget-MI và P3 (mục 16: 'pin memory' phải giống nhau).
+    Lệch cờ này làm lệch thời gian nạp batch → so sánh T_train mất công bằng."""
+    return as_bool(getattr(cfg, 'dataloader_pin_memory', True))
+
+
 def save_timing_json(path, method, cfg, timing, trainable, total, extra=None):
     """Ghi timing_result.json theo đúng cấu trúc yêu cầu (mục 14–15 của hướng dẫn).
     core = fisher + fila + train; pipeline = core + selection + eval.
@@ -174,7 +196,11 @@ def save_timing_json(path, method, cfg, timing, trainable, total, extra=None):
         'batch_size': int(getattr(cfg, 'unlearn_batch_size', 0)),
         'learning_rate': float(getattr(cfg, 'learning_rate', 0.0)),
         'grad_accumulation': 'per-epoch (tích lũy toàn bộ batch trong epoch)',
-        'amp': 'model_ul fp32; model_og/model_re fp16 (chỉ forward tham chiếu)',
+        # Precision đọc từ dtype THỰC của model (describe_precision), không hard-code.
+        'amp': 'autocast: CHỈ ở eval/monitor; vòng train chạy FP32 (không GradScaler)',
+        'precision_mode': timing.get('precision', 'unknown'),
+        'pin_memory': bool(timing.get('pin_memory', dl_pin_memory(cfg))),
+        'num_workers': int(getattr(cfg, 'num_cpu_workers', 0)),
         'lora_r': int(getattr(cfg, 'lora_r', 0)),
         'gate_mode': str(getattr(cfg, 'gate_mode', 'per_batch')),
         'gpu_name': (torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'),
@@ -185,8 +211,12 @@ def save_timing_json(path, method, cfg, timing, trainable, total, extra=None):
         'train_seconds': train_s,
         'core_seconds': core_s,
         'selection_seconds': sel_s,
+        'ckpt_seconds': float(timing.get('ckpt_seconds', 0.0)),        # ⊂ selection_seconds
         'eval_seconds': ev_s,
         'pipeline_seconds': core_s + sel_s + ev_s,
+        # Chẩn đoán per-epoch (CosSim log, eval quỹ đạo): KHÔNG thuộc core/selection/eval,
+        # nên cũng KHÔNG nằm trong pipeline_seconds — ghi riêng để giải thích wall-clock.
+        'diagnostic_seconds': float(timing.get('diagnostic_seconds', 0.0)),
         'epoch_train_seconds': timing.get('epoch_train_stat', _stat([])),
         'trainable_params': int(trainable),
         'total_params': int(total),
@@ -1702,12 +1732,14 @@ def setup_experiment(cfg, device, rank_alloc_fn=None):
 
     nw = min(int(getattr(cfg, 'num_cpu_workers', 2)), 2)
     ctx['nw'] = nw
+    _pin = dl_pin_memory(cfg)          # phải TRÙNG Forget-MI (mục 16)
+    ctx['pin_memory'] = _pin
     ctx['forget_dl'] = DataLoader(datasets['forget'],
         sampler=AlignedSampler(len(datasets['forget']), shuffle=True, seed=42),
-        batch_size=cfg.unlearn_batch_size, num_workers=nw, pin_memory=False)
+        batch_size=cfg.unlearn_batch_size, num_workers=nw, pin_memory=_pin)
     ctx['rand_dl'] = DataLoader(datasets['random'],
         sampler=AlignedSampler(len(datasets['random']), shuffle=True, seed=42),
-        batch_size=cfg.unlearn_batch_size, num_workers=nw, pin_memory=False)
+        batch_size=cfg.unlearn_batch_size, num_workers=nw, pin_memory=_pin)
 
     # thang chuẩn hóa d⁰ CHỈ cho selector S_val (không tham gia loss — xem compute_S_val)
     ctx['ref_scales'] = compute_epoch0_scales(model, ctx['model_og'],
@@ -1818,7 +1850,7 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
             'epoch': None, 'state': None, 'metrics': None}
     total_steps = 0
     total_planned = max(1, int(ctx.get('total_planned_steps', 1)))
-    t_train = t_sel = 0.0
+    t_train = t_sel = t_ckpt = t_diag = 0.0   # t_ckpt nằm TRONG t_sel; t_diag đứng riêng
     wall0 = _time.time()
 
     # ----- CE-crossing selector gold-free (S1-S4) — bật bằng ce_selector=1. Dùng sel(=D_nm_val)
@@ -1840,14 +1872,18 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
         _nbn = set_bn_eval(model_ul)     # BN giữ eval (running-stats) — đúng chuẩn LoRA base đóng băng
         if epoch == 0:
             print(f"   🧊 giữ {_nbn} BatchNorm ở eval-mode trong lúc train (base đóng băng)")
-        retain_dl = DataLoader(datasets['retain'], sampler=torch.utils.data.RandomSampler(datasets['retain']),
-                               batch_size=cfg.unlearn_batch_size, num_workers=ctx['nw'])
         n_batches = max(1, int(ctx.get('forget_batches', 1)))
         n_ep = max(1, int(cfg.unlearn_epochs))
         agg = {}; steps = 0
         # ---- T_train của epoch: CHỈ forward/backward/step, KHÔNG gồm selector ----
         reset_gpu_peak()
         _tt = CudaTimer(); _tt.__enter__()
+        # retain_dl dựng TRONG timer: Forget-MI cũng dựng lại mỗi epoch bên trong khoảng
+        # đo của nó, nên chi phí spawn worker + pin_memory phải được tính ở cả hai bên
+        # thì T_train mới so được (mục 16).
+        retain_dl = DataLoader(datasets['retain'], sampler=torch.utils.data.RandomSampler(datasets['retain']),
+                               batch_size=cfg.unlearn_batch_size, num_workers=ctx['nw'],
+                               pin_memory=ctx.get('pin_memory', True))
         optimizer.zero_grad(set_to_none=True)   # gradient TÍCH LŨY suốt epoch
         for bi, (fb, rb, retb) in enumerate(zip(ctx['forget_dl'], ctx['rand_dl'], retain_dl)):
             # tiến trình mượt trong epoch để lịch trọng số của P5 không bị bậc thang
@@ -1892,11 +1928,14 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
               f"Gu={S['G_utility']:.3f}) val_ce={S['val_ce']:.3f}")
 
         # ---- 'CHỌN EPOCH TỐT NHẤT': eval mỗi epoch trên D_t_final (như tái lập Forget-MI) ----
+        # CHẨN ĐOÁN, không phải selector: mục 10 nói rõ selector không cần full MIA/AUC/F1
+        # mỗi epoch. Forget-MI cũng xếp eval_every_epoch của nó ra ngoài → để chung một rổ
+        # riêng, không vào T_core lẫn T_selection.
         if as_bool(getattr(cfg, 'eval_test_every_epoch', False)):
             with CudaTimer() as _t2:
                 te = eval_on_test_final(model_ul, ctx['model_re'], datasets, cfg, device,
                                         light=as_bool(getattr(cfg, 'eval_test_light', True)))
-            t_sel += _t2.elapsed
+            t_diag += _t2.elapsed
             print(f"    📊 [test E{epoch:02d}] Df-AUC {te['Df_AUC']:.3f} Df-F1 {te['Df_F1']:.3f}  "
                   f"Dt-AUC {te['Dt_AUC']:.3f} Dt-F1 {te['Dt_F1']:.3f}  "
                   f"MIA {te['MIA']:.3f}/{te['MIA_paper']:.3f}  "
@@ -1907,14 +1946,18 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
                     'seed': int(cfg.random_seed), 'epoch': epoch + 1,
                     **{k: (round(v, 4) if isinstance(v, float) else v) for k, v in te.items()}})
 
-        save_ckpt(ctx['out_dir'], epoch, model_ul, optimizer, avg,
-                  filename='latest.pt', val_ce=S['val_ce'], s_val=S['S_val'])
-        sel_value = S[select_by]
-        # isfinite guard: checkpoint có S_val/val_ce = nan/inf KHÔNG BAO GIỜ được chọn.
-        if np.isfinite(sel_value) and sel_value < best['sel_value']:
-            best.update({'sel_value': sel_value, 's_val': S['S_val'], 'epoch': epoch,
-                         'state': {k: v.clone() for k, v in trainable_state_dict(model_ul).items()},
-                         'metrics': dict(S)})
+        # ---- lưu/snapshot checkpoint: mục 10 xếp vào T_selection, KHÔNG vào T_core ----
+        with CudaTimer() as _tc:
+            save_ckpt(ctx['out_dir'], epoch, model_ul, optimizer, avg,
+                      filename='latest.pt', val_ce=S['val_ce'], s_val=S['S_val'])
+            sel_value = S[select_by]
+            # isfinite guard: checkpoint có S_val/val_ce = nan/inf KHÔNG BAO GIỜ được chọn.
+            if np.isfinite(sel_value) and sel_value < best['sel_value']:
+                best.update({'sel_value': sel_value, 's_val': S['S_val'], 'epoch': epoch,
+                             'state': {k: v.clone() for k, v in trainable_state_dict(model_ul).items()},
+                             'metrics': dict(S)})
+        t_ckpt += _tc.elapsed
+        t_sel += _tc.elapsed
         if history_csv:
             append_history_row(history_csv, {
                 'method': method, 'id': str(getattr(cfg, 'id', '')), 'seed': int(cfg.random_seed),
@@ -1942,24 +1985,35 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
         t_sel += _t4.elapsed
 
     if best['epoch'] is not None:
-        cp = os.path.join(ctx['out_dir'], 'checkpoints')
-        os.makedirs(cp, exist_ok=True)
-        torch.save({'epoch': best['epoch'], 'trainable_state': best['state'],
-                    's_val': best['s_val']},
-                   os.path.join(cp, 'selected.pt'))
+        with CudaTimer() as _tc:
+            cp = os.path.join(ctx['out_dir'], 'checkpoints')
+            os.makedirs(cp, exist_ok=True)
+            torch.save({'epoch': best['epoch'], 'trainable_state': best['state'],
+                        's_val': best['s_val']},
+                       os.path.join(cp, 'selected.pt'))
+        t_ckpt += _tc.elapsed
+        t_sel += _tc.elapsed
 
     peaks['train'] = peak_train
     peaks['selection'] = peak_sel
     est = _stat(epoch_train_s)
     print(f"⏱  T_train = {t_train:.1f}s ({t_train/3600:.4f}h) · epoch: mean {est['mean']:.2f}s "
           f"± {est['std']:.2f} (min {est['min']:.2f} / max {est['max']:.2f})")
-    print(f"⏱  T_selection = {t_sel:.1f}s ({t_sel/3600:.4f}h) — giao thức, KHÔNG tính vào core")
+    print(f"⏱  T_selection = {t_sel:.1f}s ({t_sel/3600:.4f}h) — giao thức, KHÔNG tính vào core "
+          f"(trong đó ckpt I/O {t_ckpt:.1f}s)")
+    if t_diag:
+        print(f"⏱  chẩn đoán (eval mỗi epoch) {t_diag:.1f}s — không vào core, không vào selection")
     timing = {
         # ---- khóa mới, theo hướng dẫn đo thời gian ----
         'fisher_seconds': float(ctx.get('fisher_seconds', 0.0)),
         'fila_seconds': float(ctx.get('fila_seconds', 0.0)),
         'train_seconds': float(t_train),
         'selection_seconds': float(t_sel),
+        'ckpt_seconds': float(t_ckpt),             # đã gộp trong selection_seconds
+        'diagnostic_seconds': float(t_diag),       # ngoài core/selection/eval
+        # Mục 3.3: T_pipeline chỉ so được khi hai bên CÙNG selector → ghi lại để đối chiếu.
+        'selector': f"{select_by}+ce_selector" if _ce_sel is not None else str(select_by),
+        'checkpoint_policy': 'last+selected',
         'eval_seconds': 0.0,                       # điền ở finalize_and_eval
         'epoch_train_stat': est,
         'peaks': peaks,
@@ -2051,6 +2105,10 @@ def finalize_and_eval(cfg, ctx, device, method, run_id, timing, best, total_step
     timing['eval_seconds'] = _te.elapsed
     timing.setdefault('peaks', {})['eval'] = get_gpu_peak()
     print(f"⏱  T_eval = {_te.elapsed:.1f}s ({_te.elapsed/3600:.4f}h) — giao thức, KHÔNG vào core")
+    timing['precision'] = describe_precision({'model_ul': ctx.get('model_unlearn'),
+                                              'model_og': ctx.get('model_og'),
+                                              'model_re': ctx.get('model_re')})
+    timing['pin_memory'] = bool(ctx.get('pin_memory', dl_pin_memory(cfg)))
     save_timing_json(os.path.join(ctx['out_dir'], f'timing_{method}_{run_id}.json'),
                      method, cfg, timing, ctx['trainable'], ctx['total'],
                      extra={'run_id': run_id,

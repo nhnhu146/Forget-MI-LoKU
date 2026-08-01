@@ -65,6 +65,9 @@ common:
   # cùng cadence và không bên nào có thêm cơ chế ổn định gradient riêng → đặt 0.
   grad_clip: 0.0
   num_cpu_workers: 2
+  # Phải TRÙNG config_baseline_kaggle.yaml: hai phương pháp so thời gian train với nhau
+  # nên mọi tham số nạp dữ liệu (workers, pin_memory) bắt buộc giống hệt.
+  dataloader_pin_memory: true
 
   # ===== Loss weights (nền paper) =====
   lambda_ur: 1.0

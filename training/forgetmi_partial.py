@@ -554,18 +554,23 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
 
     aligned_sampler = AlignedSampler(len(forget_set), shuffle=True, seed=42)
 
+    # pin_memory lấy từ CÙNG một hàm với P3 (adv_common.dl_pin_memory) — mục 16 của hướng
+    # dẫn đo thời gian: lệch cờ này thì T_train hai bên không so được với nhau.
+    from training.adv_common import dl_pin_memory as _dlpin
+    _pin = _dlpin(args)
+
     forget_dataloader = DataLoader(forget_set, sampler=aligned_sampler,
                                   batch_size=args.unlearn_batch_size,
                                   num_workers=args.num_cpu_workers,
-                                  pin_memory=True)
+                                  pin_memory=_pin)
     val_dataloader = DataLoader(val_set, sampler=SequentialSampler(val_set),
-                                batch_size=args.eval_batch_size, num_workers=args.num_cpu_workers, pin_memory=True)
+                                batch_size=args.eval_batch_size, num_workers=args.num_cpu_workers, pin_memory=_pin)
     rand_dataloader = DataLoader(rand_set, sampler=aligned_sampler,
                                   batch_size=args.unlearn_batch_size,
                                   num_workers=args.num_cpu_workers,
-                                  pin_memory=True)
+                                  pin_memory=_pin)
     test_dataloader = DataLoader(test_set, sampler=SequentialSampler(test_set),
-                                  batch_size=args.eval_batch_size, num_workers=args.num_cpu_workers, pin_memory=True)
+                                  batch_size=args.eval_batch_size, num_workers=args.num_cpu_workers, pin_memory=_pin)
     print(f"Dataloaders: forget={len(forget_set)} val={len(val_set)} rand={len(rand_set)} test={len(test_set)} (batch={args.unlearn_batch_size})")
 
     print('Starting the Unlearning Process...')
@@ -642,7 +647,7 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
 
         retain_sampler = RandomSampler(retain_set)
         retain_dataloader = DataLoader(retain_set, sampler=retain_sampler, batch_size=args.unlearn_batch_size,
-                                    num_workers=args.num_cpu_workers, pin_memory=True)
+                                    num_workers=args.num_cpu_workers, pin_memory=_pin)
         # Same reason as outer trange: disable progress spam in non-TTY.
         epoch_iterator = tqdm(zip(forget_dataloader, rand_dataloader, retain_dataloader),
                               desc="Retain Set Iteration", disable=True)
@@ -782,15 +787,20 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
             if was_training:
                 model_ul.train()
             # Mọi epoch (kể cả epoch 0) đều đã cập nhật trọng số → đều là ứng viên hợp lệ.
+            # Snapshot ứng viên là "lưu checkpoint được chọn" (mục 10) → vào T_selection.
+            # Ở đây là clone TOÀN BỘ 113M tham số sang CPU, không phải chi phí bỏ qua được.
             if last_val_ce < best_val_ce - selection_min_delta:
                 best_val_ce = last_val_ce
                 best_epoch = epoch
                 is_best_so_far = True
                 model_to_save = model_ul.module if hasattr(model_ul, 'module') else model_ul
-                best_state = {
-                    key: value.detach().cpu().clone()
-                    for key, value in model_to_save.state_dict().items()
-                }
+                with CudaTimer() as _tcs:
+                    best_state = {
+                        key: value.detach().cpu().clone()
+                        for key, value in model_to_save.state_dict().items()
+                    }
+                t_ckpt += _tcs.elapsed
+                t_selection += _tcs.elapsed
         from evaluation.eval_unlearning import get_probability_measure
         try:
             cosine_similarity = (get_probability_measure(
@@ -925,14 +935,24 @@ def unlearn(args, output_dir, device, model_og, model_ul, model_re, optimizer, o
     _est = _stat(epoch_train_times)
     print(f"⏱  T_train = {t_train:.1f}s ({t_train/3600:.4f}h) · epoch: mean {_est['mean']:.2f}s "
           f"± {_est['std']:.2f} (min {_est['min']:.2f} / max {_est['max']:.2f})")
-    print(f"⏱  T_selection = {t_selection:.1f}s — giao thức chọn checkpoint, KHÔNG vào core")
-    print(f"⏱  monitor(CosSim log) {t_monitor:.1f}s · ckpt I/O {t_ckpt:.1f}s — cũng không vào core")
+    # Mục 10 xếp "lưu checkpoint được chọn" vào T_selection → gộp t_ckpt vào, nhưng vẫn
+    # báo cáo riêng để biết bao nhiêu là I/O thuần.
+    t_selection += t_ckpt
+    print(f"⏱  T_selection = {t_selection:.1f}s — giao thức chọn checkpoint, KHÔNG vào core "
+          f"(trong đó ckpt I/O {t_ckpt:.1f}s)")
+    print(f"⏱  chẩn đoán (CosSim log + eval mỗi epoch) {t_monitor:.1f}s — không vào core, "
+          f"không vào selection")
     timing = {'train_h': t_train / 3600, 'monitor_h': t_monitor / 3600,
               'ckpt_h': t_ckpt / 3600, 'wall_h': wall_h,
               # ---- chuẩn đo dùng chung với P3: core(FMI) = train (không Fisher/FILA) ----
               'fisher_seconds': 0.0, 'fila_seconds': 0.0,
               'train_seconds': float(t_train),
               'selection_seconds': float(t_selection),
+              'ckpt_seconds': float(t_ckpt),            # đã gộp trong selection_seconds
+              'diagnostic_seconds': float(t_monitor),   # ngoài core/selection/eval
+              # Mục 3.3: T_pipeline chỉ so được khi hai bên CÙNG selector.
+              'selector': ('val_ce+ce_selector' if _ce_sel is not None else 'val_ce'),
+              'checkpoint_policy': ('last+val_best' if dual_checkpoint_eval else 'last'),
               'eval_seconds': 0.0,                    # điền sau _final_evaluation
               'epoch_train_stat': _est, 'peaks': tm_peaks,
               'optimizer_updates': max(last_epoch + 1, 0),
@@ -1328,6 +1348,11 @@ def main():
     total_params = sum(p.numel() for p in model_unlearn.parameters())
     print(f"📊 Trainable: {trainable:,} / {total_params:,} ({100*trainable/total_params:.3f}%) — baseline full FT")
 
+    # Chốt metadata precision NGAY ĐÂY: model_og bị `del` trước lúc ghi timing JSON.
+    from training.adv_common import describe_precision as _dp
+    _precision_note = _dp({'model_ul': model_unlearn, 'model_og': model_og,
+                           'model_re': model_retrained})
+
     # Gradient checkpointing on the BERT side of model_unlearn: trades ~20% slowdown
     # for ~30-40% less activation memory. Essential to fit baseline (113M trainable +
     # 3 stacked forwards) on a 14.5 GB T4 without dropping batch size further.
@@ -1422,6 +1447,9 @@ def main():
     timing.setdefault('peaks', {})['eval'] = _gp()
     print(f"⏱  T_eval = {_tev.elapsed:.1f}s ({_tev.elapsed/3600:.4f}h) — giao thức, KHÔNG vào core")
     _rid = str(getattr(config, 'id', 'forgetmi'))
+    from training.adv_common import dl_pin_memory as _dlpin2
+    timing['precision'] = _precision_note
+    timing['pin_memory'] = bool(_dlpin2(config))
     _sj(os.path.join(output_dir, f'timing_baseline_partial_{_rid}.json'),
         'baseline_partial', config, timing, trainable, total_params,
         extra={'run_id': _rid,
