@@ -667,7 +667,7 @@ def apply_fila_subtraction(model, fila_subtraction):
 
 @torch.no_grad()
 def compute_epoch0_scales(model_ul, model_og, forget_dl, rand_dl, args, device,
-                          max_batches=None):
+                          max_batches=None, ctx=None):
     """Đo khoảng cách TRUNG BÌNH tại epoch 0 (trước khi unlearning) làm THANG CHUẨN HÓA
     cho G_forget của selector S_val:
       d⁰_u = mean_i ||[F_ul_img,F_ul_txt](D_f) − [F_og_img,F_og_txt](nhiễu)||
@@ -695,8 +695,8 @@ def compute_epoch0_scales(model_ul, model_og, forget_dl, rand_dl, args, device,
         ul_c = torch.cat((ul_i, ul_t), dim=-1)
         og_c = torch.cat((og_i, og_t), dim=-1)
         du_all.append(euclidean_distance(ul_c, og_c).cpu().numpy())
-        # Gate MỚI theo batch, riêng từng vai trò — như code gốc Forget-MI
-        g = new_batch_gates(ul_i.shape[1], ul_t.shape[1], device, roles=('ul_frg', 'og_rnd'))
+        g = _get_gates(ctx, args, ul_i.shape[1], ul_t.shape[1], device,
+                       roles=('ul_frg', 'og_rnd'))
         ul_j = g['ul_frg'](ul_i, ul_t)
         og_j = g['og_rnd'](og_i, og_t)
         dm_all.append(euclidean_distance(ul_j, og_j).cpu().numpy())
@@ -858,7 +858,7 @@ def perf_metrics(model, dataset, device, args, batch_size=32, num_classes=4):
 # ============================================================================
 
 @torch.no_grad()
-def eval_forget_losses(model_ul, model_og, forget_dl, rand_dl, args, device):
+def eval_forget_losses(model_ul, model_og, forget_dl, rand_dl, args, device, ctx=None):
     """Đánh giá IHL và các KHOẢNG CÁCH quên d_u, d_m trên D_f (KHÔNG backprop) — cho
     G_forget của selector. P4 dù tắt loss quên ở GĐ2 vẫn gọi hàm này để bắt 'nhớ lại'.
     d_u/d_m là khoảng cách Euclid tới tham chiếu og(nhiễu) đúng Forget-MI Eq.(1)-(2);
@@ -876,7 +876,8 @@ def eval_forget_losses(model_ul, model_og, forget_dl, rand_dl, args, device):
             og_i, _, og_t, _ = safe_forward(model_og, rnd_in)[:4]
         ul_i = ul_i.float(); ul_t = ul_t.float(); og_i = og_i.float(); og_t = og_t.float()
         ul_il = ul_il.float(); ul_tl = ul_tl.float()
-        g = new_batch_gates(ul_i.shape[1], ul_t.shape[1], device, roles=('ul_frg', 'og_rnd'))
+        g = _get_gates(ctx, args, ul_i.shape[1], ul_t.shape[1], device,
+                       roles=('ul_frg', 'og_rnd'))
         ul_j = g['ul_frg'](ul_i, ul_t); og_j = g['og_rnd'](og_i, og_t)
         _, _, st = forget_distance(ul_i, ul_t, ul_j, og_i, og_t, og_j)
         # IHL = 1 + p(true) − max_{v≠true} p(v)  (bounded [0,2])
@@ -980,7 +981,7 @@ def combined_batch_loss(cfg, ctx, fb, rb, retb, device, weights,
     og_ret_il = og_ret_il.float(); og_ret_tl = og_ret_tl.float()
 
     ul_ret_i, ul_ret_il, ul_ret_t, ul_ret_tl = model_ul(**ret_in)[:4]
-    gates = new_batch_gates(ul_ret_i.shape[1], ul_ret_t.shape[1], device)
+    gates = _get_gates(ctx, cfg, ul_ret_i.shape[1], ul_ret_t.shape[1], device)
     ul_ret_j = gates['ul_ret'](ul_ret_i, ul_ret_t)
     og_ret_j = gates['og_ret'](og_ret_i, og_ret_t)
 
@@ -1336,6 +1337,37 @@ def new_batch_gates(img_dim, txt_dim, device, roles=('ul_ret', 'ul_frg', 'og_rnd
     return {r: Gate(inp1_size=int(img_dim), inp2_size=int(txt_dim)).to(device) for r in roles}
 
 
+def _get_gates(ctx, cfg, img_dim, txt_dim, device,
+               roles=('ul_ret', 'ul_frg', 'og_rnd', 'og_ret')):
+    """Chọn cơ chế Gate theo cfg.gate_mode:
+
+      'per_batch'    (MẶC ĐỊNH) — tạo mới mỗi batch, riêng từng vai trò, train mode.
+                      Bám code gốc Forget-MI. Dùng cho baseline và P3 nguyên bản.
+      'fixed_shared' — CẢI TIẾN CỦA KHÓA LUẬN (không phải hành vi gốc của Forget-MI):
+                      khởi tạo MỘT Gate duy nhất trước training, đóng băng, để eval(),
+                      và dùng CHUNG cho cả hai phía của mọi khoảng cách. Khi đó
+                      Dist(G(z1), G(z2)) chỉ đo khác biệt giữa z1 và z2, không lẫn khác
+                      biệt do hai Gate ngẫu nhiên khác nhau. Gradient VẪN truyền qua
+                      Gate về LoRA; chỉ tham số Gate là bất biến.
+
+    Gate cố định được tạo LƯỜI (lần gọi đầu, khi đã biết số chiều) và cache trong ctx."""
+    mode = str(getattr(cfg, 'gate_mode', 'per_batch')).lower()
+    if mode != 'fixed_shared':
+        return new_batch_gates(img_dim, txt_dim, device, roles)
+    g = ctx.get('_fixed_gate') if isinstance(ctx, dict) else None
+    if g is None:
+        from training.joint_embedding import Gate
+        g = Gate(inp1_size=int(img_dim), inp2_size=int(txt_dim)).to(device)
+        for p in g.parameters():
+            p.requires_grad = False
+        g.eval()
+        if isinstance(ctx, dict):
+            ctx['_fixed_gate'] = g
+        print(f"🚪 gate_mode=fixed_shared: 1 Gate cố định ({img_dim}×{txt_dim}), đóng băng + eval, "
+              f"dùng chung cả hai phía [CẢI TIẾN của khóa luận, không phải Forget-MI gốc]")
+    return {r: g for r in roles}
+
+
 def build_peft(model_unlearn, cfg, target_modules, rank_pattern=None, alpha_pattern=None):
     """Bọc PEFT LoRA. rank_pattern/alpha_pattern (P6) = dict {tên_module: rank/alpha}.
     Giữ α/r không đổi: nếu chỉ truyền rank_pattern mà thiếu alpha_pattern, tự suy
@@ -1453,6 +1485,14 @@ def setup_experiment(cfg, device, rank_alloc_fn=None):
     ctx['load_h'] = (_time.time() - _t) / 3600
 
     target_modules = list(getattr(cfg, 'lora_target_modules', ['query', 'key', 'value']))
+    # Mở rộng target qua --override (P3-MORE). Dùng '|' làm phân tách vì ',' đã bị
+    # apply_overrides dùng để tách các cặp key=value.
+    #   ví dụ: lora_extra_target_modules=attention.output.dense|intermediate.dense
+    extra = str(getattr(cfg, 'lora_extra_target_modules', '') or '').strip()
+    if extra:
+        add = [m.strip() for m in extra.split('|') if m.strip()]
+        target_modules = target_modules + [m for m in add if m not in target_modules]
+        print(f"➕ Mở rộng LoRA target (+{len(add)}): {add}")
     img_last_k = int(getattr(cfg, 'lora_image_last_k_blocks', 0))
     img_inc_fc1 = bool(getattr(cfg, 'lora_image_include_fc1', False))
     image_targets = resolve_image_targets(ctx['model_og'], img_last_k, img_inc_fc1)
@@ -1504,8 +1544,13 @@ def setup_experiment(cfg, device, rank_alloc_fn=None):
     print(f"📊 Trainable: {ctx['trainable']:,}/{ctx['total']:,} "
           f"({100*ctx['trainable']/ctx['total']:.3f}%)")
 
-    print("🚪 Fusion gate: tạo MỚI mỗi batch, riêng từng vai trò, KHÔNG vào optimizer "
-          "(bám code gốc Forget-MI)")
+    _gm = str(getattr(cfg, 'gate_mode', 'per_batch')).lower()
+    if _gm == 'fixed_shared':
+        print("🚪 Fusion gate: fixed_shared — 1 Gate cố định dùng chung [CẢI TIẾN khóa luận]")
+    else:
+        print("🚪 Fusion gate: per_batch — tạo MỚI mỗi batch, riêng từng vai trò, "
+              "KHÔNG vào optimizer (bám code gốc Forget-MI)")
+    ctx['gate_mode'] = _gm
     ctx['optimizer'] = make_optimizer(model, cfg)
 
     nw = min(int(getattr(cfg, 'num_cpu_workers', 2)), 2)
@@ -1519,7 +1564,7 @@ def setup_experiment(cfg, device, rank_alloc_fn=None):
 
     # thang chuẩn hóa d⁰ CHỈ cho selector S_val (không tham gia loss — xem compute_S_val)
     ctx['ref_scales'] = compute_epoch0_scales(model, ctx['model_og'],
-        ctx['forget_dl'], ctx['rand_dl'], cfg, device)
+        ctx['forget_dl'], ctx['rand_dl'], cfg, device, ctx=ctx)
     ctx['og_perf'] = precompute_og_perf(ctx['model_og'], datasets['sel'], device, cfg)
 
     # CADENCE (bám code gốc Forget-MI): gradient TÍCH LŨY qua các batch trong epoch,
@@ -1542,7 +1587,7 @@ def precompute_og_perf(model_og, sel_dataset, device, cfg):
 
 
 def selection_metrics(model_ul, model_og, datasets, forget_dl, rand_dl,
-                      ref_scales, og_perf, cfg, device):
+                      ref_scales, og_perf, cfg, device, ctx=None):
     """Tính S_val cho checkpoint hiện tại (KHÔNG dùng test_final/retrained).
     Trả dict {S_val, G_forget, G_privacy, G_utility, val_ce, ...}."""
     weights = (float(cfg.get('sel_w_forget', 1.0)), float(cfg.get('sel_w_privacy', 1.0)),
@@ -1550,7 +1595,7 @@ def selection_metrics(model_ul, model_og, datasets, forget_dl, rand_dl,
     deltas = (float(cfg.get('sel_delta_auc', 0.02)), float(cfg.get('sel_delta_f1', 0.02)))
     bs = int(cfg.eval_batch_size)
     # G_forget (đánh giá IHL + khoảng cách quên d_u/d_m trên D_f, no-grad)
-    flosses = eval_forget_losses(model_ul, model_og, forget_dl, rand_dl, cfg, device)
+    flosses = eval_forget_losses(model_ul, model_og, forget_dl, rand_dl, cfg, device, ctx=ctx)
     # G_privacy = MIA_val (member=r_heldout, non-member=sel, đoán forget)
     mia_v = val_mia(model_ul, datasets['r_heldout'], datasets['sel'], datasets['forget'],
                     device, cfg, batch_size=bs, seed=int(cfg.random_seed))
@@ -1674,7 +1719,7 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
         _t = _time.time()
         S = selection_metrics(model_ul, ctx['model_og'], datasets,
                               ctx['forget_dl'], ctx['rand_dl'], ctx['ref_scales'],
-                              ctx['og_perf'], cfg, device)
+                              ctx['og_perf'], cfg, device, ctx=ctx)
         sched.epoch_step(S['S_val'])
         t_sel += _time.time() - _t
 
