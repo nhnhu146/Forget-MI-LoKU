@@ -32,6 +32,10 @@ python tools/build_tables.py "D:\Run_KLTN\2.8" --out-md bang.md
 - `—` = chưa chạy. `n/a` = có checkpoint nhưng metric không tính được (AUC = NaN khi
   mô hình sụp đổ).
 - Ở hàng **S2**, cột cuối là **nm_val-CE** (đại lượng selector dùng), không phải Test-CE.
+- **Giao thức MIA** (thống nhất cho mọi hàng của cả hai phương pháp): member = `D_r` lấy
+  mẫu còn **512** (`eval_max_retain`, seed 42), non-member = `D_t_final`, mục tiêu tấn
+  công = `D_f`. `MIA` dùng CE theo từng mẫu và cân bằng 1:1; `MIA_paper` dùng CE trung
+  bình theo lô và **không** cân bằng — nên `MIA_paper` nhạy với kích thước tập member.
 
 ### Công thức thời gian lõi
 
@@ -221,6 +225,9 @@ hình P3-NoKD-More khóa từ MIMIC, không tuning lại theo IU*. IU nhỏ hơn
 khớp tập quên gần như hoàn hảo (Df-AUC 1.000, forget-CE 0.002), nên cùng learning rate
 với 30 epoch là quá mạnh. **Cần đưa vào phần hạn chế của khóa luận.**
 
+S2 của Forget-MI trên IU chốt đúng **E30** nên hai hàng của nó trùng nhau (khác biệt duy
+nhất ở cột cuối là do hàng S2 ghi nm_val-CE 3.565 còn hàng E30 ghi Test-CE 3.661).
+
 Ở checkpoint S2 (E11) thì P3 còn dùng được: Dt-AUC 0.665 cao hơn Forget-MI 0.635 và sát
 gold 0.670, MIA_paper ngang nhau (0.167). Đổi lại Df-AUC 0.872 xa gold hơn (Forget-MI
 0.854) và Df-F1 chỉ 0.486 so với 0.616.
@@ -317,11 +324,12 @@ luận hiệu quả bộ nhớ.
 (10 %), 1,23× (IU). Không phải "hàng chục lần" như số liệu của code cũ trong bản thảo
 Chương 4 — con số `≈1/17` cũ phải bỏ.
 
-**6. Khả năng quên của P3 suy giảm theo tỉ lệ quên.** Thắng rõ ở 3 %, lẫn lộn ở 6 %
-(hai chỉ số MIA ngược nhau), thua rõ ở 10 % (MIA 0.730 còn cao hơn θ_og 0.717). Không
-được phát biểu "P3 tốt hơn Forget-MI" một cách tổng quát — phải nói theo từng mức quên.
+**5. Khả năng quên của P3 suy giảm theo tỉ lệ quên.** Thắng ở 3 % (hơn ở `MIA`, hoà ở
+`MIA_paper`), phụ thuộc chốt ở 6 % (S2 nghiêng Forget-MI, E30 nghiêng P3), thua rõ ở
+10 % (MIA 0.730 còn cao hơn θ_og 0.717). Không được phát biểu "P3 tốt hơn Forget-MI" một
+cách tổng quát — phải nói theo từng mức quên **và** theo chốt checkpoint.
 
-**5. Kiểm tra tái lập bit-exact.** Run `p3_m3` (chạy lại P3-NoKD-More 3%) cho kết quả
+**6. Kiểm tra tái lập bit-exact.** Run `p3_m3` (chạy lại P3-NoKD-More 3%) cho kết quả
 **trùng khít từng chữ số** với run gốc: forget-CE tại E1/E11/E30 = 1.9197 / 1.9334 /
 2.0671 ở cả hai, S2 giống nhau đến 4 chữ số thập phân. Nguyên nhân là
 `AlignedSampler.__iter__` gọi `torch.manual_seed(42)` ở đầu mỗi epoch nên RNG được ghim
@@ -341,6 +349,19 @@ bị ảnh hưởng bởi lần tính lại MIA ở Phụ lục C, vì selector 
 | MIMIC 6 % | **0.357** → 0.706 | 0.385 → **0.231** | hai chỉ số ngược nhau |
 | MIMIC 10 % | **0.616** → 0.730 | **0.455** → 0.591 | Forget-MI tốt hơn |
 | IU 3 % | **0.581** → 0.597 | 0.167 = 0.167 | xấp xỉ (nhưng P3 sụp ở E30) |
+
+Cùng các mức quên đó **tại E30** — bức tranh khác hẳn, nên phải công bố cả hai chốt:
+
+| Mức quên | MIA (FMI → P3) | MIA_paper (FMI → P3) | Kết luận |
+|---|---|---|---|
+| MIMIC 3 % | 0.627 → **0.552** | 0.286 = 0.286 | P3 hơn ở `MIA`, **hoà** ở `MIA_paper` |
+| MIMIC 6 % | 0.773 → **0.706** | 0.538 → **0.231** | P3 tốt hơn ở **cả hai** |
+| MIMIC 10 % | **0.616** → 0.731 | **0.455** → 0.591 | Forget-MI tốt hơn |
+| IU 3 % | 0.581 → **0.560** | 0.167 → **0.000** | P3 tốt hơn, nhưng mô hình đã hỏng |
+
+Chỗ lật rõ nhất là **MIMIC 6 %**: tại S2 Forget-MI thắng `MIA` rất đậm (0.357), tại E30
+lại thua cả hai chỉ số (0.773 vs 0.706). Nguyên nhân là MIA của Forget-MI biến động mạnh
+theo epoch, còn P3 gần như đứng yên. Không được chọn chốt có lợi rồi kết luận.
 
 **RQ2 — bảo toàn hiệu năng.** P3 thắng ở **mọi** cấu hình. Dt-AUC tại S2:
 
