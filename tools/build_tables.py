@@ -130,8 +130,11 @@ def ref_row(df, kind, tag):
     return hit.iloc[-1] if len(hit) else None
 
 
-def fmt(v, n=3):
-    return '—' if v is None else f'{v:.{n}f}'
+def fmt(v, n=3, miss='—'):
+    """miss='—' : khong co du lieu.  miss='n/a': co hang nhung metric khong tinh duoc
+    (vi du AUC = NaN khi mo hinh sup do, logit tran) — hai truong hop nay KHAC nhau,
+    khong duoc hien thi giong nhau."""
+    return miss if v is None else f'{v:.{n}f}'
 
 
 def quality_table(group, timings, s2, df):
@@ -158,7 +161,8 @@ def quality_table(group, timings, s2, df):
                      ' | '.join('—' for _ in M) + ' |')
         r = last_row(df, rid)
         if r is not None:
-            L.append(f"| {label} | E30 | 30 | " + ' | '.join(fmt(pick(r, k)) for k in M) + ' |')
+            L.append(f"| {label} | E30 | 30 | " +
+                     ' | '.join(fmt(pick(r, k), miss='n/a') for k in M) + ' |')
         if s is None and r is None:
             L.append(f"| {label} | – | **chưa chạy** | " + ' | '.join('—' for _ in M) + ' |')
     return '\n'.join(L)
