@@ -128,7 +128,25 @@ def main():
     base = ImageTextModel.from_pretrained(ctx['base_p']).to(device)
     peft = get_peft_model(base, ctx['peft_cfg'])
     C.apply_fila_subtraction(peft, ctx.get('fila_subtraction', {}))
-    peft.load_state_dict({k: v.to(device) for k, v in state.items()}, strict=False)
+    inc = peft.load_state_dict({k: v.to(device) for k, v in state.items()}, strict=False)
+
+    # KIEM TRA BAT BUOC: strict=False nuot im lang moi khoa khong khop. Neu cau hinh LoRA
+    # dung lai khac luc train (vi du quen override 'more' -> 8 target thay vi 16) thi model
+    # chi nhan duoc mot phan trong so, va moi so do sau do deu vo nghia.
+    unexpected = list(getattr(inc, 'unexpected_keys', []) or [])
+    loaded = len(state) - len(unexpected)
+    print(f'   nap {loaded}/{len(state)} tensor tu checkpoint')
+    if unexpected:
+        print(f'   ❌ {len(unexpected)} khoa trong checkpoint KHONG co cho trong model, vi du:')
+        for k in unexpected[:6]:
+            print(f'      {k}')
+        raise SystemExit(
+            'Cau hinh LoRA dung lai KHAC luc train. Truyen dung override cua run do — '
+            'voi P3-NoKD-More can:\n'
+            '  lora_extra_target_modules=attention.output.dense|intermediate.dense|output.dense\n'
+            '  lora_image_last_k_blocks=2')
+    n_tr = sum(p.numel() for p in peft.parameters() if p.requires_grad)
+    print(f'   tham so LoRA cua model dung lai: {n_tr:,}')
     model = peft.merge_and_unload()
 
     ds = ctx['datasets']
