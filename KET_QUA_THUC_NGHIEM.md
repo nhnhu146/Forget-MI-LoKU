@@ -6,7 +6,7 @@ Tổng hợp toàn bộ run đã hoàn thành. Sinh lại bằng:
 python tools/build_tables.py "D:\Run_KLTN\2.8" --out-md bang.md
 ```
 
-**Trạng thái: 11/12 run.** Còn thiếu `p3_m10` (P3-NoKD-More trên MIMIC 10%).
+**Trạng thái: 12/12 run — đã đủ toàn bộ thực nghiệm.**
 
 ---
 
@@ -103,22 +103,40 @@ chỉ trích một chỉ số.
 
 ---
 
-## Bảng 3 — MIMIC-CXR 10% *(thiếu P3)*
+## Bảng 3 — MIMIC-CXR 10%
 
 | Mô hình | Chốt | Epoch | Df-AUC ↓ | Df-F1 ↓ | Dt-AUC ↑ | Dt-F1 ↑ | MIA ↓ | MIA_paper ↓ | Forget-CE | Test-CE |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | θ_og (gốc) | – | – | 0.757 | 0.469 | 0.695 | 0.384 | 0.717 | 0.682 | 1.662 | 2.108 |
 | θ_re (gold) | – | – | 0.547 | 0.274 | 0.607 | 0.338 | 0.364 | 0.227 | 3.264 | 2.881 |
-| Forget-MI | S2 | E30 | 0.704 | 0.349 | 0.653 | 0.308 | 0.616 | 0.455 | 2.549 | 2.552 |
+| Forget-MI | S2 | E30 | **0.704** | **0.349** | 0.653 | 0.308 | **0.616** | **0.455** | 2.549 | 2.898 |
 | Forget-MI | E30 | 30 | 0.704 | 0.349 | 0.653 | 0.308 | 0.559 | 1.000 | 2.549 | 2.906 |
-| P3-NoKD-More | – | **chưa chạy** | — | — | — | — | — | — | — | — |
+| P3-NoKD-More | S2 | E30 | 0.728 | 0.417 | **0.692** | **0.384** | 0.730 | 0.591 | 1.683 | 2.109 |
+| P3-NoKD-More | E30 | 30 | 0.728 | 0.417 | 0.692 | 0.384 | 0.731 | 0.591 | 1.683 | 1.864 |
 
 | Mô hình | Tham số cập nhật | Tỉ lệ | T_Fisher | T_FILA | T_train | **T_core** | Peak alloc | Peak reserved |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | Forget-MI | 113 238 164 | 100 % | 0 | 0 | 6 403,3 s | **6 403,3 s** | 6,92 GB | 7,17 GB |
-| P3-NoKD-More | — | — | — | — | — | — | — | — |
+| P3-NoKD-More | 1 451 008 | **1,27 %** | 294,2 s | 0,9 s | 5 447,5 s | **5 742,5 s** | 13,92 GB | 14,08 GB |
 
-Forget-MI ở 10% không có điểm cắt CE (S1/S3 không xác định), S2 lấy E30.
+**Nhận xét — đây là mức quên P3 yếu nhất.** Forget-MI tốt hơn ở toàn bộ trục quên và
+riêng tư: Df-AUC 0.704 vs 0.728, Df-F1 0.349 vs 0.417, MIA 0.616 vs 0.730,
+MIA_paper 0.455 vs 0.591. MIA của P3 (0.730) còn **cao hơn θ_og (0.717)**, tức ở mức
+10% phương pháp đề xuất gần như không giảm được rò rỉ thành viên.
+
+P3 chỉ thắng ở trục tiện ích (Dt-AUC 0.692 vs 0.653, Dt-F1 0.384 vs 0.308, Test-CE
+1.864 vs 2.906) — nhưng đó là hệ quả trực tiếp của việc nó ít thay đổi mô hình.
+
+Nguyên nhân nhìn thấy rõ ở quỹ đạo CE: forget-CE của P3 gần như **đứng yên** suốt 30
+epoch (1.616 → 1.574 → 1.676 → 1.683), `ce_gap` chỉ dao động trong khoảng
+[−0.645, −0.427] và không bao giờ cắt. Tập quên 10% lớn hơn nhiều nên 30 lần cập nhật
+trên 1,27 % tham số không đủ để dịch chuyển mô hình.
+
+Cả hai phương pháp đều không có điểm cắt CE ở mức 10% (S1/S3 không xác định), S2 lấy E30.
+
+> **Cần ghi vào khóa luận:** khả năng quên của P3 suy giảm theo tỉ lệ quên — mạnh ở 3%,
+> hòa/lẫn lộn ở 6%, thua rõ ở 10%. Đây là giới hạn của thiết kế hiệu-quả-tham-số với
+> ngân sách cập nhật cố định, không phải lỗi cài đặt.
 
 ---
 
@@ -215,6 +233,7 @@ Chỉ **S2** được dùng trong các bảng chính; S1/S3/S4 ghi lại để �
 | Forget-MI MIMIC 6% | 14 | 13 | 14 | 5 |
 | P3-NoKD-More MIMIC 6% | — | 29 | — | 11 |
 | Forget-MI MIMIC 10% | — | 29 | — | 29 |
+| P3-NoKD-More MIMIC 10% | — | 29 | — | 29 |
 | Forget-MI IU 3% | — | 29 | — | 29 |
 | P3-NoKD-More IU 3% | 11 | 10 | 11 | 10 |
 | Ablation: P3 đầy đủ | — | 29 | — | 12 |
@@ -240,6 +259,7 @@ thuật toán), chỉ dùng để giải thích wall-clock.
 | Forget-MI MIMIC 6% | 3 995,5 | 3 516,9 | 1 328,6 | 8 840,9 | 1 024,6 | 133,18 ± 0,44 s |
 | P3-NoKD-More MIMIC 6% | 3 390,2 | 9 578,0 | 474,1 | 13 442,3 | 0,0 | 103,41 ± 0,63 s |
 | Forget-MI MIMIC 10% | 6 403,3 | 3 822,5 | 1 342,5 | 11 568,4 | 1 061,7 | 213,44 ± 0,50 s |
+| P3-NoKD-More MIMIC 10% | 5 742,5 | 13 163,6 | 617,7 | 19 523,8 | 0,0 | 181,58 ± 1,37 s |
 | Forget-MI IU 3% | 1 882,6 | 3 084,8 | 1 284,8 | 6 252,2 | 8 367,8 | 62,75 ± 0,49 s |
 | P3-NoKD-More IU 3% | 1 533,6 | 8 690,3 | 536,4 | 10 760,3 | 0,0 | 42,45 ± 0,52 s |
 | Ablation: P3 đầy đủ | 1 906,4 | 7 494,0 | 409,0 | 9 809,4 | 0,0 | 54,83 ± 0,72 s |
@@ -266,9 +286,13 @@ LoRA. Chênh lệch `T_core` thực tế do thuật toán còn nhỏ hơn con s�
 được kết luận hiệu quả **tham số** (1,27 % vs 100 %, tức ít hơn 78×), không được kết
 luận hiệu quả bộ nhớ.
 
-**4. Mức tăng tốc khiêm tốn.** `T_core` nhanh hơn 1,17× (3 %), 1,18× (6 %), 1,23× (IU).
-Không phải "hàng chục lần" như số liệu của code cũ trong bản thảo Chương 4 — con số
-`≈1/17` cũ phải bỏ.
+**4. Mức tăng tốc khiêm tốn.** `T_core` nhanh hơn 1,17× (3 %), 1,18× (6 %), 1,12×
+(10 %), 1,23× (IU). Không phải "hàng chục lần" như số liệu của code cũ trong bản thảo
+Chương 4 — con số `≈1/17` cũ phải bỏ.
+
+**6. Khả năng quên của P3 suy giảm theo tỉ lệ quên.** Thắng rõ ở 3 %, lẫn lộn ở 6 %
+(hai chỉ số MIA ngược nhau), thua rõ ở 10 % (MIA 0.730 còn cao hơn θ_og 0.717). Không
+được phát biểu "P3 tốt hơn Forget-MI" một cách tổng quát — phải nói theo từng mức quên.
 
 **5. Kiểm tra tái lập bit-exact.** Run `p3_m3` (chạy lại P3-NoKD-More 3%) cho kết quả
 **trùng khít từng chữ số** với run gốc: forget-CE tại E1/E11/E30 = 1.9197 / 1.9334 /
@@ -278,10 +302,37 @@ lại bất kể giai đoạn khởi tạo tiêu bao nhiêu số ngẫu nhiên.
 
 ---
 
-## Còn thiếu
+## Tổng kết theo câu hỏi nghiên cứu
 
-| Run | Ước tính |
+**RQ1 — khả năng quên và rò rỉ thành viên.** Phụ thuộc mạnh vào tỉ lệ quên.
+Mọi số dưới đây đều lấy ở checkpoint **S2** cho cả hai phương pháp:
+
+| Mức quên | MIA (FMI → P3) | MIA_paper (FMI → P3) | Kết luận |
+|---|---|---|---|
+| MIMIC 3 % | 0.657 → **0.552** | 0.429 → **0.286** | P3 tốt hơn |
+| MIMIC 6 % | **0.357** → 0.706 | 0.385 → **0.231** | hai chỉ số ngược nhau |
+| MIMIC 10 % | **0.616** → 0.730 | **0.455** → 0.591 | Forget-MI tốt hơn |
+| IU 3 % | **0.581** → 0.597 | 0.167 = 0.167 | xấp xỉ (nhưng P3 sụp ở E30) |
+
+**RQ2 — bảo toàn hiệu năng.** P3 thắng ở **mọi** cấu hình. Dt-AUC tại S2:
+
+| | MIMIC 3 % | MIMIC 6 % | MIMIC 10 % | IU 3 % |
+|---|---:|---:|---:|---:|
+| Forget-MI | 0.668 | 0.658 | 0.653 | 0.635 |
+| **P3-NoKD-More** | **0.704** | **0.689** | **0.692** | **0.665** |
+
+Test-CE của P3 cũng luôn thấp hơn ở checkpoint E30.
+
+**RQ3 — hiệu quả tài nguyên.**
+
+| Trục | Kết luận |
 |---|---|
-| `p3_m10` — P3-NoKD-More, MIMIC 10% | ~2,7 h |
+| Tham số cập nhật | **1,27 % vs 100 %** — ít hơn 78×, kết luận vững, không phụ thuộc phần cứng |
+| Thời gian lõi | nhanh hơn **1,12–1,23×** — khiêm tốn, và còn được lợi từ chênh lệch precision |
+| GPU peak | **13,92 vs 6,92 GB — P3 tốn gấp 2,01×**, không được nói là tiết kiệm bộ nhớ |
 
-Chạy bằng `run_kltn_final_kaggle.ipynb`, Cell 2 đặt `JOB = 'p3_m10'`.
+---
+
+## Trạng thái
+
+Đủ **12/12 run**. Không còn thực nghiệm nào phải chạy theo danh sách tối thiểu.
