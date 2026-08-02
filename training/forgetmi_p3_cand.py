@@ -65,12 +65,17 @@ def resolve_scheme(name):
     return name, SCHEMES[name], {}
 
 
-def make_weight_fn(cfg, w4):
+def make_weight_fn(cfg, w4, ablated=False):
     """w4 = (w_uu, w_ur, w_mu, w_mr). combined_batch_loss nhận thứ tự
-    (λ_UR, λ_UU, λ_MU, λ_MR, λ_CE, λ_KD, λ_IHL)."""
+    (λ_UR, λ_UU, λ_MU, λ_MR, λ_CE, λ_KD, λ_IHL).
+
+    ablated=True: đang chạy ablation có bỏ hẳn một số thành phần nên tổng < 1 — KHÔNG
+    chuẩn hóa lại. Chuẩn hóa lại sẽ vừa bỏ MU/MR vừa nhân đôi UU/UR, tức đổi HAI thứ
+    cùng lúc; ablation phải giữ nguyên trọng số của các thành phần còn lại."""
     w_uu, w_ur, w_mu, w_mr = w4
     total = w_uu + w_ur + w_mu + w_mr
-    assert abs(total - 1.0) < 1e-9, f"Tổng trọng số block Forget-MI phải = 1, đang là {total}"
+    if not ablated:
+        assert abs(total - 1.0) < 1e-9, f"Tổng trọng số block Forget-MI phải = 1, đang là {total}"
     w = (float(w_ur), float(w_uu), float(w_mu), float(w_mr),
          float(getattr(cfg, 'lambda_ce', 1.0)),
          float(getattr(cfg, 'lambda_kd', 1.0)),
@@ -89,9 +94,21 @@ def main():
     ap.add_argument('--seed', type=int, default=None)
     ap.add_argument('--override', type=str, default=None)
     ap.add_argument('--fresh', action='store_true')
+    ap.add_argument('--ablate', type=str, default='none',
+                    choices=['none', 'fisher_fila', 'ihl', 'mu_mr'],
+                    help="Ablation pipeline (chỉ MIMIC 3%%): bỏ ĐÚNG một thành phần, "
+                         "mọi thứ còn lại giữ nguyên.")
     cli = ap.parse_args()
 
     base_scheme, w4, extra = resolve_scheme(cli.scheme)
+    # ---- Ablation: chỉ chạm vào ĐÚNG thành phần bị bỏ ----
+    if cli.ablate == 'fisher_fila':
+        extra['loku_random_init'] = True     # bỏ cả ước lượng Fisher lẫn FILA/W*
+    elif cli.ablate == 'ihl':
+        extra['lambda_ihl'] = 0.0
+    elif cli.ablate == 'mu_mr':
+        w_uu, w_ur, _, _ = w4
+        w4 = (w_uu, w_ur, 0.0, 0.0)          # KHÔNG chuẩn hóa lại — xem make_weight_fn
 
     cfg_d = C.flatten_method_config(C.load_config(cli.config), 'p3')
     if cli.seed is not None:
@@ -105,8 +122,10 @@ def main():
     if device.type != 'cuda' and os.environ.get('FORGETMI_ALLOW_CPU') != '1':
         raise SystemExit("Không có GPU. Bật GPU hoặc set FORGETMI_ALLOW_CPU=1.")
 
-    weight_fn, w = make_weight_fn(cfg, w4)
+    weight_fn, w = make_weight_fn(cfg, w4, ablated=(cli.ablate != 'none'))
     print(f"🟢 Device: {device}  |  METHOD={METHOD}  |  scheme={cli.scheme} (base={base_scheme})")
+    if cli.ablate != 'none':
+        print(f"🔬 ABLATION = {cli.ablate}  (bỏ đúng thành phần này, phần còn lại giữ nguyên)")
     print(f"   Forget-MI block (tổng=1): w_uu={w[1]:.4f}  w_ur={w[0]:.4f}  "
           f"w_mu={w[2]:.4f}  w_mr={w[3]:.4f}")
     print(f"   Ngoài block: λ_CE={w[4]:.3f}  λ_KD={w[5]:.3f}  λ_IHL={w[6]:.3f}")
@@ -131,9 +150,11 @@ def main():
 
     csv_path = str(getattr(cfg, 'results_csv_path', os.path.join(out_dir, 'results_advanced.csv')))
     C.finalize_and_eval(cfg, ctx, device, METHOD, run_id, timing, best, total_steps, csv_path,
-                        extra_row={'scheme': cli.scheme, 'w_uu': round(w[1], 4),
+                        extra_row={'scheme': cli.scheme, 'ablate': cli.ablate,
+                                   'w_uu': round(w[1], 4),
                                    'w_ur': round(w[0], 4), 'w_mu': round(w[2], 4),
-                                   'w_mr': round(w[3], 4), 'lambda_kd': w[5]})
+                                   'w_mr': round(w[3], 4), 'lambda_kd': w[5],
+                                   'lambda_ihl': w[6]})
     print(f"✅ P3-{cli.scheme.upper()} done.")
 
 

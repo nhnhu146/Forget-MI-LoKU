@@ -201,6 +201,9 @@ def save_timing_json(path, method, cfg, timing, trainable, total, extra=None):
         'precision_mode': timing.get('precision', 'unknown'),
         'pin_memory': bool(timing.get('pin_memory', dl_pin_memory(cfg))),
         'num_workers': int(getattr(cfg, 'num_cpu_workers', 0)),
+        # Mục 3.3: thiếu hai trường này thì không ai kiểm được T_pipeline có so được không.
+        'selector': str(timing.get('selector', 'unknown')),
+        'checkpoint_policy': str(timing.get('checkpoint_policy', 'unknown')),
         'lora_r': int(getattr(cfg, 'lora_r', 0)),
         'gate_mode': str(getattr(cfg, 'gate_mode', 'per_batch')),
         'gpu_name': (torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'),
@@ -1669,17 +1672,28 @@ def setup_experiment(cfg, device, rank_alloc_fn=None):
     print(f"🎯 LoRA targets (trước phân rank): {target_modules}")
     fisher_bs = int(getattr(cfg, 'fisher_batch_size', cfg.unlearn_batch_size))
     fisher_n = int(getattr(cfg, 'fisher_max_samples', 256))
+    # ABLATION 'w/o Fisher/FILA': bỏ Fisher THẬT SỰ, không chỉ bỏ FILA init. Nếu vẫn chạy
+    # Fisher thì T_core của biến thể này bị cộng oan ~270s và bảng ablation nói sai về chi
+    # phí bỏ đi. Chỉ bỏ được khi không có rank_alloc_fn (P4/P5 cần f_imp/r_imp để chia rank).
+    _skip_fisher = as_bool(getattr(cfg, 'loku_random_init', False)) and rank_alloc_fn is None
     reset_gpu_peak()
-    with CudaTimer() as _tf:
-        f_imp = compute_fisher_importance(ctx['model_og'],
-            DataLoader(datasets['forget'], batch_size=fisher_bs), device, target_modules, cfg, fisher_n)
-        r_imp = compute_fisher_importance(ctx['model_og'],
-            DataLoader(datasets['retain'], batch_size=fisher_bs), device, target_modules, cfg, fisher_n)
-    ctx['fisher_seconds'] = _tf.elapsed
-    ctx['peaks']['fisher'] = get_gpu_peak()
-    ctx['fisher_h'] = _tf.elapsed / 3600            # giữ khóa cũ cho CSV/notebook
+    if _skip_fisher:
+        print("🎲 ABLATION w/o Fisher/FILA: BỎ luôn bước ước lượng Fisher (T_fisher = 0)")
+        f_imp = r_imp = {}
+        ctx['fisher_seconds'] = 0.0
+        ctx['peaks']['fisher'] = (0.0, 0.0)
+        ctx['fisher_h'] = 0.0
+    else:
+        with CudaTimer() as _tf:
+            f_imp = compute_fisher_importance(ctx['model_og'],
+                DataLoader(datasets['forget'], batch_size=fisher_bs), device, target_modules, cfg, fisher_n)
+            r_imp = compute_fisher_importance(ctx['model_og'],
+                DataLoader(datasets['retain'], batch_size=fisher_bs), device, target_modules, cfg, fisher_n)
+        ctx['fisher_seconds'] = _tf.elapsed
+        ctx['peaks']['fisher'] = get_gpu_peak()
+        ctx['fisher_h'] = _tf.elapsed / 3600         # giữ khóa cũ cho CSV/notebook
+        print(f"⏱  T_fisher = {_tf.elapsed:.1f}s  (peak alloc {ctx['peaks']['fisher'][0]:.2f} GB)")
     ctx['f_imp'], ctx['r_imp'] = f_imp, r_imp
-    print(f"⏱  T_fisher = {_tf.elapsed:.1f}s  (peak alloc {ctx['peaks']['fisher'][0]:.2f} GB)")
 
     rank_pattern = alpha_pattern = None
     if rank_alloc_fn is not None:
