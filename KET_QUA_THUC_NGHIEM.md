@@ -53,7 +53,7 @@ GPU peak của lõi lấy **MAX** giữa các giai đoạn, không cộng dồn.
 | θ_og (gốc) | – | – | 0.731 | 0.419 | 0.695 | 0.384 | 0.657 | 0.714 | 1.966 | 2.108 |
 | θ_re (gold) | – | – | 0.498 | 0.179 | 0.615 | 0.297 | 0.423 | 0.000 | 4.736 | 3.046 |
 | Forget-MI | S2 | E7 | 0.734 | 0.345 | 0.668 | 0.319 | 0.657 | 0.429 | 2.979 | 2.975 |
-| Forget-MI | E30 | 30 | 0.623 | 0.278 | 0.648 | 0.307 | 0.567 | 1.000 | 3.578 | 2.906 |
+| Forget-MI | E30 | 30 | 0.623 | 0.278 | 0.648 | 0.307 | 0.627 | 0.286 | 3.578 | 2.906 |
 | **P3-NoKD-More** | S2 | E30 | 0.682 | 0.365 | **0.704** | **0.394** | **0.552** | **0.286** | 2.067 | 2.073 |
 | **P3-NoKD-More** | E30 | 30 | 0.683 | 0.365 | 0.704 | 0.394 | 0.552 | 0.286 | 2.067 | 1.829 |
 
@@ -62,10 +62,10 @@ GPU peak của lõi lấy **MAX** giữa các giai đoạn, không cộng dồn.
 | Forget-MI | 113 238 164 | 100 % | 0 | 0 | 2 172,5 s | **2 172,5 s** | 6,92 GB | 7,25 GB |
 | P3-NoKD-More | 1 451 008 | **1,27 %** | 270,9 s | 0,9 s | 1 592,7 s | **1 864,5 s** | 13,92 GB | 14,08 GB |
 
-**Nhận xét.** P3 tốt hơn ở cả ba trục: rò rỉ thấp hơn (MIA 0.552 vs 0.567; MIA_paper
-0.286 vs 1.000), tiện ích cao hơn (Dt-AUC 0.704 vs 0.648, còn cao hơn cả θ_og 0.695),
-Test-CE thấp hơn (1.829 vs 2.906). Đổi lại Df-AUC xa gold hơn (0.683 vs 0.623 — gold
-0.498), tức quên ít hơn.
+**Nhận xét.** P3 tốt hơn ở trục riêng tư theo `MIA` (0.552 vs 0.627 tại E30; 0.552 vs
+0.657 tại S2) nhưng **hoà** ở `MIA_paper` (0.286 vs 0.286 tại E30). Tiện ích cao hơn rõ
+(Dt-AUC 0.704 vs 0.648, còn cao hơn cả θ_og 0.695) và Test-CE thấp hơn (1.829 vs 2.906).
+Đổi lại Df-AUC xa gold hơn (0.683 vs 0.623 — gold 0.498), tức quên ít hơn.
 
 S2 của Forget-MI rơi vào **E7** vì CE cắt nhau rất sớm, lúc đó mô hình gần như chưa quên
 gì (Df-AUC 0.734 còn cao hơn θ_og 0.731, MIA 0.657 = θ_og). Từ E8 trở đi Forget-MI
@@ -84,7 +84,7 @@ S2 lấy epoch có |gap| nhỏ nhất = epoch cuối. Vì vậy hàng S2 và hà
 | θ_og (gốc) | – | – | 0.730 | 0.434 | 0.695 | 0.384 | 0.736 | 0.769 | 1.755 | 2.108 |
 | θ_re (gold) | – | – | 0.596 | 0.339 | 0.665 | 0.381 | 0.613 | 0.462 | 2.450 | 2.191 |
 | Forget-MI | S2 | E14 | 0.702 | 0.330 | 0.658 | 0.291 | **0.357** | 0.385 | 3.019 | 3.022 |
-| Forget-MI | E30 | 30 | 0.633 | 0.296 | 0.641 | 0.296 | 0.544 | 1.000 | 3.142 | 3.088 |
+| Forget-MI | E30 | 30 | 0.633 | 0.296 | 0.641 | 0.296 | 0.773 | 0.538 | 3.142 | 3.088 |
 | **P3-NoKD-More** | S2 | E30 | 0.670 | 0.353 | **0.689** | **0.370** | 0.706 | **0.231** | 2.087 | 2.087 |
 | **P3-NoKD-More** | E30 | 30 | 0.670 | 0.353 | 0.689 | 0.370 | 0.706 | 0.231 | 2.087 | 1.895 |
 
@@ -93,13 +93,19 @@ S2 lấy epoch có |gap| nhỏ nhất = epoch cuối. Vì vậy hàng S2 và hà
 | Forget-MI | 113 238 164 | 100 % | 0 | 0 | 3 995,5 s | **3 995,5 s** | 6,92 GB | 7,20 GB |
 | P3-NoKD-More | 1 451 008 | **1,27 %** | 286,9 s | 0,9 s | 3 102,4 s | **3 390,2 s** | 13,92 GB | 14,20 GB |
 
-**Nhận xét.** Kết quả đảo chiều so với 3% ở trục riêng tư: MIA của Forget-MI@S2 xuống
-0.357 (thấp hơn cả gold 0.613) trong khi P3 ở mức 0.706 (θ_og 0.736). Tuy nhiên
-MIA_paper thì P3 tốt hơn (0.231 vs 0.385). P3 vẫn giữ tiện ích tốt hơn ở mọi chốt
-(Dt-AUC 0.689 vs 0.641–0.658) và Test-CE thấp nhất bảng (1.895).
+**Nhận xét.** Kết luận ở mức 6% **phụ thuộc chốt checkpoint**, cần nói rõ:
 
-Hai chỉ số MIA cho kết luận ngược nhau ở mức quên này — cần nói rõ trong báo cáo thay vì
-chỉ trích một chỉ số.
+- **Tại S2**: MIA của Forget-MI xuống 0.357 (thấp hơn cả gold 0.613) trong khi P3 ở mức
+  0.706 — Forget-MI tốt hơn hẳn. Nhưng `MIA_paper` lại ngược: P3 0.231 vs 0.385.
+- **Tại E30**: P3 tốt hơn ở **cả hai** chỉ số (MIA 0.706 vs 0.773; MIA_paper 0.231 vs
+  0.538).
+
+Điểm E14 mà S2 chọn cho Forget-MI rơi đúng vào lúc MIA của nó chạm đáy; đến E30 thì
+MIA vọt lên 0.773, cao hơn cả θ_og 0.736. Đây là biểu hiện mất ổn định của Forget-MI
+theo epoch chứ không phải một ưu thế bền vững.
+
+P3 giữ tiện ích tốt hơn ở mọi chốt (Dt-AUC 0.689 vs 0.641–0.658) và Test-CE thấp nhất
+bảng (1.895).
 
 ---
 
@@ -110,7 +116,7 @@ chỉ trích một chỉ số.
 | θ_og (gốc) | – | – | 0.757 | 0.469 | 0.695 | 0.384 | 0.717 | 0.682 | 1.662 | 2.108 |
 | θ_re (gold) | – | – | 0.547 | 0.274 | 0.607 | 0.338 | 0.364 | 0.227 | 3.264 | 2.881 |
 | Forget-MI | S2 | E30 | **0.704** | **0.349** | 0.653 | 0.308 | **0.616** | **0.455** | 2.549 | 2.898 |
-| Forget-MI | E30 | 30 | 0.704 | 0.349 | 0.653 | 0.308 | 0.559 | 1.000 | 2.549 | 2.906 |
+| Forget-MI | E30 | 30 | 0.704 | 0.349 | 0.653 | 0.308 | 0.616 | 0.455 | 2.549 | 2.906 |
 | P3-NoKD-More | S2 | E30 | 0.728 | 0.417 | **0.692** | **0.384** | 0.730 | 0.591 | 1.683 | 2.109 |
 | P3-NoKD-More | E30 | 30 | 0.728 | 0.417 | 0.692 | 0.384 | 0.731 | 0.591 | 1.683 | 1.864 |
 
@@ -191,7 +197,7 @@ trong khi nm_val-CE chỉ 1.850, tức bắt đầu over-forget; S2 vì thế ch
 | θ_og (gốc) | – | – | 1.000 | 1.000 | 0.676 | 0.622 | 0.990 | 1.000 | 0.002 | 2.174 |
 | θ_re (gold) | – | – | 0.651 | 0.587 | 0.670 | 0.614 | 0.545 | 0.000 | 2.329 | 2.307 |
 | Forget-MI | S2 | E30 | 0.854 | **0.616** | 0.635 | **0.533** | 0.581 | 0.167 | 3.019 | 3.565 |
-| Forget-MI | E30 | 30 | 0.854 | 0.616 | 0.635 | 0.533 | 0.602 | 0.667 | 3.019 | 3.661 |
+| Forget-MI | E30 | 30 | 0.854 | 0.616 | 0.635 | 0.533 | 0.581 | 0.167 | 3.019 | 3.661 |
 | **P3-NoKD-More** | S2 | E11 | 0.872 | 0.486 | **0.665** | 0.410 | 0.597 | **0.167** | 8.946 | 9.180 |
 | **P3-NoKD-More** | E30 | 30 | n/a | 0.334 | n/a | 0.351 | 0.560 | 0.000 | 37.771 | 28.553 |
 
@@ -274,6 +280,27 @@ các lần chạy.
 
 ## Phụ lục C — Các điểm phải công bố kèm số liệu
 
+**0. MIA của Forget-MI ở hàng E30 ĐÃ ĐƯỢC TÍNH LẠI.** Bản `_final_evaluation` của
+Forget-MI bỏ qua `eval_max_retain=512` và dùng toàn bộ retain (~5410) làm tập member,
+trong khi selector và P3 đều dùng bản lấy mẫu 512 — khiến `MIA_paper` bão hoà ở 1.000
+và không so được giữa hai phương pháp. Đã đánh giá lại 4 checkpoint `last.pt` bằng
+`forgetmi_eval_only.py` (dùng `final_evaluation` của `adv_common`, có lấy mẫu 512).
+
+Kiểm chứng: mọi Df-AUC/Df-F1/Dt-AUC/Dt-F1/CE **trùng khít từng chữ số** với lần trước
+(cùng checkpoint, cùng `D_t_final`), chỉ MIA/MIA_paper đổi. Và ở MIMIC 10% cùng IU 3% —
+hai bộ mà S2 chốt đúng E30 — MIA tính lại **trùng khít giá trị S2** (0.616/0.455 và
+0.581/0.167), trong khi trước đó lệch (0.559 và 0.602).
+
+| Bộ | MIA cũ → mới | MIA_paper cũ → mới |
+|---|---|---|
+| MIMIC 3% | 0.567 → **0.627** | 1.000 → **0.286** |
+| MIMIC 6% | 0.544 → **0.773** | 1.000 → **0.538** |
+| MIMIC 10% | 0.559 → **0.616** | 1.000 → **0.455** |
+| IU 3% | 0.602 → **0.581** | 0.667 → **0.167** |
+
+Các hàng **S2 không đổi** (selector vốn đã dùng member 512). Hàng E30 của P3 cũng không
+đổi (đã dùng 512 sẵn).
+
 **1. Không được so `T_pipeline` giữa hai phương pháp.** P3 chọn checkpoint theo `S_val`,
 Forget-MI theo `val_ce` — khác selector nên `T_selection` không so được, kéo theo
 `T_pipeline` cũng vậy. Chỉ dùng cột **`T_core`**.
@@ -305,7 +332,8 @@ lại bất kể giai đoạn khởi tạo tiêu bao nhiêu số ngẫu nhiên.
 ## Tổng kết theo câu hỏi nghiên cứu
 
 **RQ1 — khả năng quên và rò rỉ thành viên.** Phụ thuộc mạnh vào tỉ lệ quên.
-Mọi số dưới đây đều lấy ở checkpoint **S2** cho cả hai phương pháp:
+Mọi số dưới đây đều lấy ở checkpoint **S2** cho cả hai phương pháp (các giá trị S2 không
+bị ảnh hưởng bởi lần tính lại MIA ở Phụ lục C, vì selector vốn đã dùng member 512):
 
 | Mức quên | MIA (FMI → P3) | MIA_paper (FMI → P3) | Kết luận |
 |---|---|---|---|
