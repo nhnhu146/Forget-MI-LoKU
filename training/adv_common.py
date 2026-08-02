@@ -871,8 +871,22 @@ def compute_epoch0_scales(model_ul, model_og, forget_dl, rand_dl, args, device,
 # Eval: MIA, CosSim, perf (AUC + Macro-F1 + Pairwise-AUC + F1) — đủ metric Forget-MI
 # ============================================================================
 
+# Autocast FP16 ở bước ĐÁNH GIÁ. Mặc định bật (giữ nguyên hành vi mọi run đã chạy).
+# Tắt bằng override `eval_autocast=0` để chẩn đoán: khi IHL đẩy logit rất lớn, giá trị
+# vượt 65504 dưới FP16 → inf → softmax → NaN → AUC không tính được. Khi đó NaN là
+# artefact của precision lúc eval, KHÔNG phải mô hình mất ổn định ở FP32.
+_EVAL_AUTOCAST = True
+
+
+def set_eval_autocast(flag):
+    global _EVAL_AUTOCAST
+    _EVAL_AUTOCAST = bool(flag)
+    print(f"🔬 eval autocast FP16: {'BẬT (mặc định)' if _EVAL_AUTOCAST else 'TẮT → eval chạy FP32'}")
+
+
 def _eval_autocast():
-    return torch.autocast(device_type='cuda', enabled=torch.cuda.is_available())
+    return torch.autocast(device_type='cuda',
+                          enabled=(_EVAL_AUTOCAST and torch.cuda.is_available()))
 
 
 def subsample_dataset(dataset, max_n, seed=42):
