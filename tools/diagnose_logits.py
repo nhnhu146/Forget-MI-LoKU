@@ -28,11 +28,15 @@ import training.adv_common as C
 
 
 def collect_logits(model, dataset, device, cfg, autocast, batch_size=16):
-    """Trả (logit_ảnh, logit_văn_bản, nhãn) — chạy dưới autocast hoặc FP32 thuần."""
+    """Trả (logit_ảnh, logit_văn_bản, nhãn, onehot).
+
+    Lấy one-hot ĐÚNG như perf_metrics làm (batch[5]) — không tự dựng bằng np.eye theo
+    số lớp có mặt. Mô hình có đầu ra 4 lớp trong khi IU chỉ dùng lớp 0/1, nên dựng
+    one-hot 2 cột sẽ lệch chiều với logit 4 cột và gây IndexError giả."""
     from torch.utils.data import DataLoader
     C.set_eval_autocast(autocast)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    li, lt, ys = [], [], []
+    li, lt, ys, ohs = [], [], [], []
     model.eval()
     with torch.no_grad():
         for batch in loader:
@@ -42,7 +46,11 @@ def collect_logits(model, dataset, device, cfg, autocast, batch_size=16):
                 out = C.safe_forward(model, inputs)
             li.append(out[1].float().cpu()); lt.append(out[3].float().cpu())
             ys.append(label_raw.long().view(-1).cpu())
-    return torch.cat(li), torch.cat(lt), torch.cat(ys)
+            oh = batch[5].cpu().numpy()
+            if oh.ndim == 1 or oh.shape[-1] == 1:
+                oh = np.eye(4)[np.clip(oh.flatten().astype(int), 0, 3)]
+            ohs.append(oh.astype(int))
+    return torch.cat(li), torch.cat(lt), torch.cat(ys), np.concatenate(ohs, axis=0)
 
 
 def report(tag, li, lt, ys):
@@ -60,19 +68,35 @@ def report(tag, li, lt, ys):
     return bool(torch.isfinite(li).all() and torch.isfinite(lt).all())
 
 
-def try_auc(li, lt, ys):
-    """Tính AUC bằng ĐÚNG hàm của pipeline để tái hiện NaN."""
+def try_auc(li, lt, oh, cfg):
+    """Tái hiện ĐÚNG đường tính của perf_metrics: dùng logit ẢNH (outputs[1]),
+    one-hot của dataset, và cùng output_channel_encoding."""
     from joint_img_txt.metrics import compute_auc
     from scipy.special import softmax
-    n = int(ys.max().item()) + 1
-    oh = np.eye(max(n, 2))[ys.numpy()]
-    for name, x in (('ảnh', li), ('văn bản', lt)):
+    enc = str(getattr(cfg, 'output_channel_encoding', 'multiclass'))
+    for name, x in (('ảnh  <- perf_metrics dùng cái này', li), ('văn bản', lt)):
         try:
             p = softmax(x.numpy(), axis=1)
-            print(f'  AUC ({name}): {compute_auc(oh, p)}'
-                  f'   | softmax có NaN: {bool(np.isnan(p).any())}')
+            auc, pairwise = compute_auc(oh.tolist(), p.tolist(), output_channel_encoding=enc)
+            valid = [a for a in auc if not (isinstance(a, float) and np.isnan(a))]
+            mean = float(np.mean(valid)) if valid else float('nan')
+            print(f'  AUC ({name}): tung kenh {auc}')
+            print(f'  {"":8} -> mean cua kenh hop le = {mean}'
+                  f'   | softmax co NaN: {bool(np.isnan(p).any())}')
         except Exception as e:
-            print(f'  AUC ({name}): LỖI {type(e).__name__}: {e}')
+            print(f'  AUC ({name}): LOI {type(e).__name__}: {e}')
+
+
+def run_perf(model, dataset, device, cfg, autocast, tag):
+    """Goi THANG perf_metrics — dung ham that su sinh ra so trong bang ket qua."""
+    C.set_eval_autocast(autocast)
+    try:
+        m = C.perf_metrics(model, dataset, device, cfg,
+                           batch_size=int(getattr(cfg, 'eval_batch_size', 16)))
+        print(f'  perf_metrics [{tag}]: AUC={m.get("AUC")}  Macro_F1={m.get("Macro_F1")}'
+              f'  Pairwise_AUC={m.get("Pairwise_AUC")}')
+    except Exception as e:
+        print(f'  perf_metrics [{tag}]: LOI {type(e).__name__}: {e}')
 
 
 def main():
@@ -110,13 +134,15 @@ def main():
     ds = ctx['datasets']
     for split in ('forget', 'test_final'):
         print(f'\n{"=" * 66}\nTẬP: {split}  (n = {len(ds[split])})\n{"=" * 66}')
-        li16, lt16, ys = collect_logits(model, ds[split], device, cfg, autocast=True)
+        li16, lt16, ys, oh = collect_logits(model, ds[split], device, cfg, autocast=True)
         ok16 = report('FP16 autocast (đúng như lúc chạy thật)', li16, lt16, ys)
-        try_auc(li16, lt16, ys)
+        try_auc(li16, lt16, oh, cfg)
+        run_perf(model, ds[split], device, cfg, True, 'FP16')
 
-        li32, lt32, _ = collect_logits(model, ds[split], device, cfg, autocast=False)
+        li32, lt32, _, _ = collect_logits(model, ds[split], device, cfg, autocast=False)
         ok32 = report('FP32 (tắt autocast)', li32, lt32, ys)
-        try_auc(li32, lt32, ys)
+        try_auc(li32, lt32, oh, cfg)
+        run_perf(model, ds[split], device, cfg, False, 'FP32')
 
         print(f'\n>>> KẾT LUẬN cho {split}:')
         if not ok32:
