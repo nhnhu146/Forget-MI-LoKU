@@ -1881,6 +1881,14 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
             state_fn=lambda m: {k: v.detach().cpu().clone() for k, v in trainable_state_dict(m).items()},
             load_fn=lambda m, s: m.load_state_dict(s, strict=False))
 
+    # ---- RESET RNG NGAY TRƯỚC VÒNG TRAIN (bắt buộc cho ablation) ----
+    # Gate được tạo MỚI mỗi batch từ RNG toàn cục và chạy ở train-mode (Dropout), nên
+    # quỹ đạo huấn luyện phụ thuộc mạnh vào trạng thái RNG lúc bắt đầu train. Giai đoạn
+    # khởi tạo tiêu tốn RNG khác nhau giữa các biến thể — FILA gọi svd_lowrank (SVD ngẫu
+    # nhiên), ablation w/o Fisher/FILA thì không gọi. Không reset ở đây thì biến thể
+    # ablation khác bản đầy đủ ở CẢ thành phần bị bỏ LẪN dãy gate ngẫu nhiên, tức không
+    # còn là ablation sạch. Reset để mọi biến thể vào vòng train với cùng một RNG.
+    set_seed(int(cfg.random_seed))
     for epoch in range(int(cfg.unlearn_epochs)):
         model_ul.train()
         _nbn = set_bn_eval(model_ul)     # BN giữ eval (running-stats) — đúng chuẩn LoRA base đóng băng
