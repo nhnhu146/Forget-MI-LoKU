@@ -15,6 +15,7 @@ ghi ra đĩa nên phải dựng lại bằng setup_experiment (tất định v�
 """
 import argparse
 import os
+import re
 import sys
 
 import numpy as np
@@ -99,6 +100,35 @@ def run_perf(model, dataset, device, cfg, autocast, tag):
         print(f'  perf_metrics [{tag}]: LOI {type(e).__name__}: {e}')
 
 
+def infer_lora_cfg(keys):
+    """Suy cấu hình LoRA TỪ CHÍNH checkpoint, thay vì trông chờ người gọi truyền đúng
+    override. Sai cấu hình là hỏng âm thầm (strict=False bỏ qua khóa lệch) nên tự suy
+    an toàn hơn. Trả (danh sách target văn bản bổ sung, số khối ảnh cuối).
+
+    Khóa có dạng:
+      base_model.model.text_model.bert.encoder.layer.0.intermediate.dense.lora_A...
+      base_model.model.img_model.layer7.0.conv1.lora_A...
+    """
+    txt = []
+    # 'output.dense' và 'attention.output.dense' đều khớp hậu tố '.output.dense' →
+    # tách bằng cách xét ký tự đứng trước.
+    if any(re.search(r'\.attention\.output\.dense\.lora_', k) for k in keys):
+        txt.append('attention.output.dense')
+    if any(re.search(r'\.intermediate\.dense\.lora_', k) for k in keys):
+        txt.append('intermediate.dense')
+    if any(re.search(r'(?<!attention)\.output\.dense\.lora_', k)
+           and not re.search(r'\.attention\.output\.dense\.lora_', k) for k in keys):
+        txt.append('output.dense')
+
+    # CHỈ đếm khối thật sự có LoRA. trainable_state còn chứa BUFFER (BN running stats…)
+    # của mọi img_model.layerN, đếm cả buffer sẽ ra 7 khối thay vì 2.
+    lora_keys = [k for k in keys if '.lora_' in k]
+    layers = sorted({int(m.group(1)) for k in lora_keys
+                     for m in [re.search(r'img_model\.layer(\d+)\.', k)] if m})
+    # resolve_image_targets lấy k khối CUỐI → số khối riêng biệt chính là k
+    return txt, (len(layers) if layers else 0)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--config', required=True)
@@ -106,22 +136,36 @@ def main():
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--override', default=None)
     ap.add_argument('--scheme', default='uni_nokd')
+    ap.add_argument('--no-infer', action='store_true',
+                    help='Tắt suy cấu hình LoRA từ checkpoint (dùng nguyên config + override)')
     a = ap.parse_args()
 
     cfg_d = C.flatten_method_config(C.load_config(a.config), 'p3')
     cfg_d['random_seed'] = int(a.seed)
     cfg_d = C.apply_overrides(cfg_d, a.override)
+
+    # ---- Nạp checkpoint TRƯỚC setup_experiment ----
+    # Vừa để suy ra cấu hình LoRA, vừa để hỏng thì hỏng ngay chứ không sau 8 phút Fisher.
+    print(f'📦 Nạp {a.ckpt}')
+    payload = torch.load(a.ckpt, map_location='cpu', weights_only=False)
+    state = payload.get('trainable_state', payload.get('lora_state', payload))
+    print(f'   epoch trong checkpoint: {payload.get("epoch")}  |  {len(state)} tensor')
+
+    if not a.no_infer:
+        txt_extra, img_k = infer_lora_cfg(list(state.keys()))
+        if txt_extra:
+            cfg_d['lora_extra_target_modules'] = '|'.join(txt_extra)
+        if img_k:
+            cfg_d['lora_image_last_k_blocks'] = img_k
+        print(f'🔎 Suy từ checkpoint: lora_extra_target_modules={cfg_d.get("lora_extra_target_modules", "(không có)")}'
+              f'  lora_image_last_k_blocks={cfg_d.get("lora_image_last_k_blocks")}')
+
     cfg = C.Cfg(cfg_d)
     C.set_seed(int(cfg.random_seed))
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     print('🔧 Dựng lại pipeline P3 (Fisher + FILA) để tái tạo W* — checkpoint chỉ có LoRA...')
     ctx = C.setup_experiment(cfg, device)
-
-    print(f'📦 Nạp {a.ckpt}')
-    payload = torch.load(a.ckpt, map_location='cpu', weights_only=False)
-    state = payload.get('trainable_state', payload.get('lora_state', payload))
-    print(f'   epoch trong checkpoint: {payload.get("epoch")}  |  {len(state)} tensor')
 
     from joint_img_txt.model import ImageTextModel
     from peft import get_peft_model
