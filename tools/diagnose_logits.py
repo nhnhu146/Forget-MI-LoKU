@@ -89,15 +89,18 @@ def try_auc(li, lt, oh, cfg):
 
 
 def run_perf(model, dataset, device, cfg, autocast, tag):
-    """Goi THANG perf_metrics — dung ham that su sinh ra so trong bang ket qua."""
+    """Goi THANG perf_metrics — dung ham that su sinh ra so trong bang ket qua.
+    Tra AUC (float, co the la nan) hoac None neu nem loi."""
     C.set_eval_autocast(autocast)
     try:
         m = C.perf_metrics(model, dataset, device, cfg,
                            batch_size=int(getattr(cfg, 'eval_batch_size', 16)))
         print(f'  perf_metrics [{tag}]: AUC={m.get("AUC")}  Macro_F1={m.get("Macro_F1")}'
               f'  Pairwise_AUC={m.get("Pairwise_AUC")}')
+        return m.get('AUC')
     except Exception as e:
         print(f'  perf_metrics [{tag}]: LOI {type(e).__name__}: {e}')
+        return None
 
 
 def infer_lora_cfg(keys):
@@ -169,6 +172,10 @@ def main():
 
     from joint_img_txt.model import ImageTextModel
     from peft import get_peft_model
+    # Giải phóng model_unlearn của ctx: từ đây chỉ cần base_p / peft_cfg / fila_subtraction
+    # / datasets. Bớt một model FP32 đầy đủ trên GPU cho chắc.
+    ctx.pop('model_unlearn', None)
+    torch.cuda.empty_cache()
     base = ImageTextModel.from_pretrained(ctx['base_p']).to(device)
     peft = get_peft_model(base, ctx['peft_cfg'])
     C.apply_fila_subtraction(peft, ctx.get('fila_subtraction', {}))
@@ -189,6 +196,16 @@ def main():
             'voi P3-NoKD-More can:\n'
             '  lora_extra_target_modules=attention.output.dense|intermediate.dense|output.dense\n'
             '  lora_image_last_k_blocks=2')
+    # Chiều ngược lại: model có NHIỀU chỗ LoRA hơn checkpoint. Khi đó khóa thiếu rơi vào
+    # missing_keys — vốn luôn rất lớn (mọi trọng số nền không nằm trong trainable_state)
+    # nên không dùng missing_keys để phát hiện được. Đối chiếu SỐ TENSOR LoRA hai bên.
+    n_ck = sum(1 for k in state if '.lora_' in k)
+    n_md = sum(1 for n_, _ in peft.named_parameters() if '.lora_' in n_)
+    print(f'   tensor LoRA: checkpoint {n_ck} · model dựng lại {n_md}')
+    if n_ck != n_md:
+        raise SystemExit(
+            f'Số tensor LoRA lệch ({n_ck} vs {n_md}): model dựng lại có nhiều/ít vị trí LoRA '
+            f'hơn checkpoint. Cấu hình suy ra chưa khớp — kiểm tra lora_r và danh sách target.')
     n_tr = sum(p.numel() for p in peft.parameters() if p.requires_grad)
     print(f'   tham so LoRA cua model dung lai: {n_tr:,}')
     model = peft.merge_and_unload()
@@ -197,25 +214,37 @@ def main():
     for split in ('forget', 'test_final'):
         print(f'\n{"=" * 66}\nTẬP: {split}  (n = {len(ds[split])})\n{"=" * 66}')
         li16, lt16, ys, oh = collect_logits(model, ds[split], device, cfg, autocast=True)
-        ok16 = report('FP16 autocast (đúng như lúc chạy thật)', li16, lt16, ys)
+        report('FP16 autocast (đúng như lúc chạy thật)', li16, lt16, ys)
         try_auc(li16, lt16, oh, cfg)
-        run_perf(model, ds[split], device, cfg, True, 'FP16')
+        auc16 = run_perf(model, ds[split], device, cfg, True, 'FP16')
 
         li32, lt32, _, _ = collect_logits(model, ds[split], device, cfg, autocast=False)
-        ok32 = report('FP32 (tắt autocast)', li32, lt32, ys)
+        ok32_img = bool(torch.isfinite(li32).all())
+        report('FP32 (tắt autocast)', li32, lt32, ys)
         try_auc(li32, lt32, oh, cfg)
-        run_perf(model, ds[split], device, cfg, False, 'FP32')
+        auc32 = run_perf(model, ds[split], device, cfg, False, 'FP32')
 
-        print(f'\n>>> KẾT LUẬN cho {split}:')
-        if not ok32:
-            print('    TRƯỜNG HỢP A — logit KHÔNG hữu hạn ngay ở FP32.')
-            print('    Mô hình mất ổn định số thật sự. Báo cáo: dùng checkpoint S2 làm kết quả chính.')
-        elif ok32 and not ok16:
-            print('    TRƯỜNG HỢP C — FP32 hữu hạn, FP16 tràn.')
-            print('    NaN là ARTEFACT của autocast lúc eval, KHÔNG phải mô hình sụp đổ.')
-            print('    Phải sửa câu giải thích trong báo cáo và dùng số FP32.')
+        # Kết luận phải dựa vào ĐÚNG đại lượng đã sinh ra NaN trong bảng, tức AUC của
+        # perf_metrics (nhánh ẢNH). Bản trước kết luận theo tính hữu hạn của logit VĂN BẢN
+        # nên in "TRƯỜNG HỢP C" trong khi perf_metrics vẫn ra AUC hợp lệ — sai.
+        nan16 = auc16 is None or (isinstance(auc16, float) and np.isnan(auc16))
+        nan32 = auc32 is None or (isinstance(auc32, float) and np.isnan(auc32))
+        print(f'\n>>> KẾT LUẬN cho {split}:  (AUC của perf_metrics: FP16={auc16}  FP32={auc32})')
+        if nan16 and not nan32:
+            print('    TRƯỜNG HỢP C — FP16 cho NaN, FP32 cho số hợp lệ.')
+            print('    NaN trong bảng là ARTEFACT của autocast lúc eval, KHÔNG phải mô hình sụp đổ.')
+            print('    Sửa câu giải thích Bảng 5 và dùng số FP32.')
+        elif nan16 and nan32 and not ok32_img:
+            print('    TRƯỜNG HỢP A — cả hai đều NaN và logit ảnh KHÔNG hữu hạn ở FP32.')
+            print('    Mô hình mất ổn định số thật sự. Dùng checkpoint S2 làm kết quả chính.')
+        elif nan16 and nan32 and ok32_img:
+            print('    TRƯỜNG HỢP B — logit ảnh hữu hạn mà AUC vẫn NaN → lỗi hàm metric.')
+            print('    Phải sửa hàm đánh giá rồi tính lại AUC cho CẢ OG/GOLD/Forget-MI/P3 trên IU.')
         else:
-            print('    FP32 và FP16 đều hữu hạn — nếu AUC vẫn NaN thì là TRƯỜNG HỢP B (lỗi metric).')
+            print('    KHÔNG TÁI HIỆN ĐƯỢC NaN — cả FP16 lẫn FP32 đều cho AUC hợp lệ.')
+            print('    Nghĩa là mô hình dựng lại KHÁC mô hình lúc chạy thật, hoặc giá trị NaN')
+            print('    trong bảng đến từ nguyên nhân khác. KHÔNG được dùng số ở đây để thay')
+            print('    vào Bảng 5 khi chưa giải thích được chênh lệch.')
     C.set_eval_autocast(True)
 
 
