@@ -1006,15 +1006,24 @@ def perf_metrics(model, dataset, device, args, batch_size=32, num_classes=4):
     labels_oh = np.concatenate(all_labels_oh, axis=0)
     probs = (logistic.cdf(logits) if args.output_channel_encoding == 'multilabel'
              else softmax(logits, axis=1))
+    # AUC theo kênh và Pairwise-AUC phải bọc try/except RIÊNG. Trước đây chung một khối:
+    # phần pairwise ném lỗi (ví dụ ZeroDivisionError khi softmax FP32 underflow về 0) là
+    # mất luôn AUC theo kênh vốn đã tính xong — chính là nguyên nhân P3 trên IU tại E30
+    # báo AUC = NaN dù logit hoàn toàn hữu hạn.
+    auc_mean = pairwise_mean = float('nan')
+    pairwise = {}
     try:
         auc, pairwise = compute_auc(labels_oh.tolist(), probs.tolist(),
                                     output_channel_encoding=args.output_channel_encoding)
         valid = [a for a in auc if not (isinstance(a, float) and np.isnan(a))]
         auc_mean = float(np.mean(valid)) if valid else float('nan')
+    except Exception as e:
+        print(f"   [auc warn] {e}")
+    try:
         pw_valid = [v for v in pairwise.values() if not (isinstance(v, float) and np.isnan(v))]
         pairwise_mean = float(np.mean(pw_valid)) if pw_valid else float('nan')
     except Exception as e:
-        print(f"   [auc warn] {e}"); auc_mean = pairwise_mean = float('nan'); pairwise = {}
+        print(f"   [pairwise warn] {e}")
     try:
         f1m, _, _ = get_acc_f1(labels_oh, probs, args.output_channel_encoding)
         macro_f1 = float(f1m['macro_f1']); f1 = float(f1m['f1']); accuracy = float(f1m['accuracy'])

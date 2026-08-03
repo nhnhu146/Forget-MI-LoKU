@@ -144,8 +144,14 @@ def compute_auc(labels, preds, output_channel_encoding='multilabel'):
             for j in range(len(all_y)): # j to indicate number of data points dimension
                 if all_y[j][channel0] == 1 or all_y[j][channel1] == 1:
                     y.append(all_y[j][channel1])
-                    pred.append(all_pred[j][channel1]/(all_pred[j][channel0]+all_pred[j][channel1]))
-            # Check if both classes are represented 
+                    # Khi logit rất lớn (mô hình bị đẩy quá mạnh), softmax FP32 underflow
+                    # về ĐÚNG 0 cho cả hai kênh → 0/0 → ZeroDivisionError, và lỗi này xảy
+                    # ra TRƯỚC cả kiểm tra len(set(y))<2 bên dưới nên làm hỏng luôn phần
+                    # AUC theo kênh đã tính xong ở trên. Mẫu như vậy không mang thông tin
+                    # phân biệt hai lớp → gán 0.5 (vô định, không thiên vị bên nào).
+                    denom = all_pred[j][channel0] + all_pred[j][channel1]
+                    pred.append(all_pred[j][channel1] / denom if denom > 0 else 0.5)
+            # Check if both classes are represented
             if len(set(y)) < 2:
                 print(f"Skipping AUC computation for pair {channel0} vs {channel1} due to insufficient data.")
                 return np.nan
