@@ -1088,8 +1088,13 @@ def _final_evaluation(config, output_dir, device, model_unlearn, model_retrained
     paper_bs = int(getattr(config, 'mia_paper_batch_size', 32))
 
     # 1. MIA (per-sample + paper-style)
+    # Tập member PHẢI lấy mẫu còn eval_max_retain (512), giống hệt selector và giống
+    # final_evaluation của adv_common. Trước đây truyền thẳng toàn bộ retain (~5400) →
+    # cùng một checkpoint cho ra hai giá trị MIA khác nhau, và MIA_paper (không cân bằng
+    # lớp) bão hòa ở 1.000 do lệch 5400 : 400.
+    member_ds = _subsample_dataset(dataset['retain'], eval_max_retain, int(config.random_seed))
     try:
-        mia_res = run_mia(model_unlearn, dataset['retain'], dataset['test'], dataset['forget'],
+        mia_res = run_mia(model_unlearn, member_ds, dataset['test'], dataset['forget'],
                           device, config, batch_size=bs,
                           seed=int(config.random_seed), paper_batch_size=paper_bs)
         mia = mia_res['persample']

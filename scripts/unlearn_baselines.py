@@ -161,12 +161,14 @@ def main():
 
     # FULL retain mỗi epoch (chuẩn cho FT/GA baseline): retain (6010) ÁP ĐẢO forget (201) →
     # KHÔNG over-forget, khớp Table 1 nơi các baseline này gần như không unlearn. forget được cycle.
+    from training.adv_common import dl_pin_memory
+    _pin = dl_pin_memory(config)          # dùng chung với Forget-MI và phương pháp đề xuất
     retain_loader = DataLoader(
         retain_set, sampler=RandomSampler(retain_set),
-        batch_size=bs, num_workers=workers, pin_memory=True)
+        batch_size=bs, num_workers=workers, pin_memory=_pin)
     forget_loader = DataLoader(
         forget_set, sampler=RandomSampler(forget_set),
-        batch_size=bs, num_workers=workers, pin_memory=True)
+        batch_size=bs, num_workers=workers, pin_memory=_pin)
     # NegGrad+: trọng số forget mặc định = tỉ lệ |Df|/|Dr| → negation NHẸ (chuẩn), tránh phân kỳ.
     neg_lambda = (cli.neggrad_lambda if cli.neggrad_lambda is not None
                   else n_forget / max(1, len(retain_set)))
@@ -218,8 +220,13 @@ def main():
     print(f"⏱  {cli.method.upper()} done in {elapsed_h * 60:.1f} min ({elapsed_h:.2f}h)")
 
     # Eval 1 LẦN (không per-epoch) → tái dùng eval baseline + ghi CSV method-labeled.
+    # csv_path lấy từ config: không truyền thì _final_evaluation tự ghi vào
+    # output_dir/../../results_summary.csv, tức KHÁC file của các phương pháp khác.
     _final_evaluation(config, output_dir, device, model_ul, model_re, dataset,
-                      elapsed_h, trainable, total_params, tracker=None, method=cli.method)
+                      elapsed_h, trainable, total_params, tracker=None, method=cli.method,
+                      csv_path=getattr(config, 'results_csv_path', None),
+                      row_extra={'epochs': cli.epochs, 'lr': lr,
+                                 'optimizer_updates': cli.epochs * len(retain_loader)})
 
 
 if __name__ == '__main__':
