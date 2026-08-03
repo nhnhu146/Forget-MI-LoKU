@@ -365,9 +365,28 @@ AUC chuyển từ `NaN` sang 0.710 / 0.590. Số dùng trong Bảng 5 lấy ở 
 
 **7. Kiểm tra tái lập bit-exact.** Run `p3_m3` (chạy lại P3-NoKD-More 3%) cho kết quả
 **trùng khít từng chữ số** với run gốc: forget-CE tại E1/E11/E30 = 1.9197 / 1.9334 /
-2.0671 ở cả hai, S2 giống nhau đến 4 chữ số thập phân. Nguyên nhân là
-`AlignedSampler.__iter__` gọi `torch.manual_seed(42)` ở đầu mỗi epoch nên RNG được ghim
-lại bất kể giai đoạn khởi tạo tiêu bao nhiêu số ngẫu nhiên.
+2.0671 ở cả hai, S2 giống nhau đến 4 chữ số thập phân.
+
+**8. HẠN CHẾ — thứ tự dữ liệu và dãy Gate bị cố định giữa các epoch.**
+`AlignedSampler.__iter__` gọi `torch.manual_seed(42)` mỗi lần được duyệt, tức **đầu mỗi
+epoch**. Hệ quả đo được:
+
+- thứ tự batch của `forget`, `random` **và** `retain` lặp y hệt qua cả 30 epoch;
+- Gate được tạo mới mỗi batch, nhưng vì RNG bị ghim nên đó là **cùng một dãy Gate phát
+  lại 30 lần** chứ không phải 30 dãy khác nhau;
+- `--seed 7` **không** đổi thứ tự mẫu lẫn dãy Gate (giá trị 42 bị viết cứng ở nơi tạo
+  sampler); seed chỉ đổi phân hoạch dữ liệu, khởi tạo và MIA.
+
+Đây là **hành vi kế thừa nguyên vẹn từ code Forget-MI gốc** (`torch.manual_seed(self.seed)`
+và `AlignedSampler(..., shuffle=True, seed=42)` đều có trong bản gốc), không phải do bản
+tái lập thêm vào. Bản tái lập chỉ sửa đúng một lỗi hiển nhiên: bản gốc gọi
+`torch.randperm(...)` mà **không gán kết quả** nên xáo trộn vô hiệu — sửa rồi thì thứ tự
+là một hoán vị cố định thay vì tuần tự, tính chất "lặp lại mỗi epoch" thì không đổi.
+
+Ảnh hưởng: **cả hai phương pháp chịu như nhau** nên mọi so sánh trong tài liệu này vẫn
+công bằng, và đây cũng là lý do kết quả tái lập bit-exact ở mục 7. Nhưng nếu về sau chạy
+đa-seed để báo mean ± std thì **bắt buộc phải sửa**, nếu không độ biến thiên đo được sẽ
+hẹp giả tạo.
 
 ---
 
@@ -391,20 +410,28 @@ Cùng các mức quên đó **tại E30** — bức tranh khác hẳn, nên ph�
 | MIMIC 3 % | 0.627 → **0.552** | 0.286 = 0.286 | P3 hơn ở `MIA`, **hoà** ở `MIA_paper` |
 | MIMIC 6 % | 0.773 → **0.706** | 0.538 → **0.231** | P3 tốt hơn ở **cả hai** |
 | MIMIC 10 % | **0.616** → 0.731 | **0.455** → 0.591 | Forget-MI tốt hơn |
-| IU 3 % | 0.581 → **0.560** | 0.167 → **0.000** | P3 tốt hơn, nhưng mô hình đã hỏng |
+| IU 3 % | 0.581 → **0.560** | 0.167 → **0.000** | P3 tốt hơn, nhưng xem RQ2 |
 
 Chỗ lật rõ nhất là **MIMIC 6 %**: tại S2 Forget-MI thắng `MIA` rất đậm (0.357), tại E30
 lại thua cả hai chỉ số (0.773 vs 0.706). Nguyên nhân là MIA của Forget-MI biến động mạnh
 theo epoch, còn P3 gần như đứng yên. Không được chọn chốt có lợi rồi kết luận.
 
-**RQ2 — bảo toàn hiệu năng.** P3 thắng ở **mọi** cấu hình. Dt-AUC tại S2:
+**RQ2 — bảo toàn hiệu năng.** Dt-AUC tại **S2** — P3 thắng ở mọi cấu hình:
 
 | | MIMIC 3 % | MIMIC 6 % | MIMIC 10 % | IU 3 % |
 |---|---:|---:|---:|---:|
 | Forget-MI | 0.668 | 0.658 | 0.653 | 0.635 |
 | **P3-NoKD-More** | **0.704** | **0.689** | **0.692** | **0.665** |
 
-Test-CE của P3 cũng luôn thấp hơn ở checkpoint E30.
+Dt-AUC tại **E30** — P3 thắng 3/4, **thua ở IU**:
+
+| | MIMIC 3 % | MIMIC 6 % | MIMIC 10 % | IU 3 % |
+|---|---:|---:|---:|---:|
+| Forget-MI | 0.648 | 0.641 | 0.653 | **0.635** |
+| **P3-NoKD-More** | **0.704** | **0.689** | **0.692** | 0.590 |
+
+Chỗ thua duy nhất là IU tại E30, đúng nơi P3 quên quá đà (xem Bảng 5). Test-CE của P3
+thấp hơn ở mọi cấu hình MIMIC.
 
 **RQ3 — hiệu quả tài nguyên.**
 
@@ -416,6 +443,68 @@ Test-CE của P3 cũng luôn thấp hơn ở checkpoint E30.
 
 ---
 
+## Phụ lục D — Chuẩn bị phản biện
+
+Tổng hợp những chỗ dễ bị hỏi, kèm câu trả lời dựa trên số liệu đã có. Mọi thay đổi trong
+quá trình làm đều có lịch sử git, có thể trình ra khi cần.
+
+**"Sao trong bảng từng có ô `n/a` rồi lại có số?"**
+Do một lỗi trong hàm tính AUC, không phải do chạy lại thí nghiệm. Cùng một checkpoint:
+trước khi vá cho `NaN`, sau khi vá cho 0.710 / 0.590, trong khi `Macro_F1` **không đổi**
+(0.334 / 0.351) — chứng minh vẫn đúng mô hình đó. Chi tiết ở Phụ lục C mục 6.
+
+**"Bản vá đó có làm sai lệch các số khác không?"**
+Không. Bản vá chỉ kích hoạt khi mẫu số **đúng bằng 0** — tình huống trước đây làm chương
+trình văng lỗi, tức không có số nào để mà thay đổi. Đã quét toàn bộ kết quả: trong 12 run
+chỉ **đúng một ô** từng bị lỗi này (P3 / IU / E30), và nó đã được điền.
+
+**"Vì sao MIA của Forget-MI bị tính lại?"**
+Bản đánh giá cuối của Forget-MI dùng toàn bộ tập giữ lại (~5410 mẫu) làm member, trong
+khi selector và P3 đều dùng bản lấy mẫu 512. Cùng một checkpoint mà ra hai giá trị MIA
+khác nhau. Đã đánh giá lại cả 4 checkpoint bằng đúng đường tính của P3. Bằng chứng đúng:
+mọi Df-AUC/Df-F1/Dt-AUC/Dt-F1/CE **trùng khít từng chữ số** lần trước, chỉ MIA đổi; và ở
+MIMIC 10% cùng IU — hai bộ mà S2 chốt đúng E30 — MIA tính lại **trùng khít giá trị S2**.
+
+**"P3 nhanh hơn bao nhiêu?"**
+`T_core` nhanh hơn **1,12–1,23×**, không hơn. Và phải nói kèm: mô hình tham chiếu của P3
+chạy fp16 còn Forget-MI chạy fp32, nên phần chênh do thuật toán còn nhỏ hơn con số này.
+Số `≈1/17` trong bản thảo cũ là của code cũ, phải bỏ.
+
+**"P3 có tiết kiệm tài nguyên không?"**
+Chỉ **tham số**: 1,27 % so với 100 %, tức ít hơn 78 lần — kết luận này vững vì không phụ
+thuộc phần cứng. **Bộ nhớ thì ngược lại**: GPU đỉnh 13,92 GB so với 6,92 GB, tức P3 tốn
+gấp 2,01 lần. Không được phát biểu P3 tiết kiệm bộ nhớ.
+
+**"P3 có tốt hơn Forget-MI không?"**
+Không thể trả lời chung. Phụ thuộc **tỉ lệ quên** và **chốt checkpoint**: thắng ở MIMIC
+3%, lẫn lộn ở 6% (S2 nghiêng Forget-MI, E30 nghiêng P3), thua rõ ở 10%. Trên IU thì P3
+quên nhiều hơn nhưng mất tiện ích. Xem hai bảng ở phần RQ1 và RQ2.
+
+**"Vì sao chỉ chạy một lần, không có mean ± std?"**
+Ngân sách GPU: 12 run × ~3h trên tài khoản Kaggle miễn phí. Mọi bảng đều ghi rõ
+`single-run timing`. Lưu ý thêm: theo Phụ lục C mục 8, muốn chạy đa-seed cho có ý nghĩa
+thì phải sửa `AlignedSampler` trước, nếu không độ biến thiên sẽ hẹp giả tạo.
+
+**"Vì sao không so tổng thời gian pipeline?"**
+Hai phương pháp dùng selector khác nhau (`S_val` và `val_ce`) nên thời gian chọn
+checkpoint không so được, kéo theo pipeline cũng vậy. Chỉ dùng `T_core`. Công cụ dựng
+bảng tự phát cảnh báo này.
+
+**"Ablation `w/o MU/MR` có tổng trọng số 2/3, có phải lỗi không?"**
+Cố ý. Chuẩn hoá lại sẽ vừa bỏ MU/MR vừa nhân đôi UU/UR — đổi hai thứ cùng lúc, không còn
+là ablation sạch. Cả hai phương án đều có nhược điểm; đã chọn phương án giữ nguyên trọng
+số các thành phần còn lại và ghi rõ trong Bảng 4. Vì optimizer là AdamW (bất biến theo tỉ
+lệ loss) nên việc tổng nhỏ hơn 1 gần như không đổi độ lớn bước cập nhật.
+
+**"P3 sụp đổ trên IU, có phải cài đặt sai không?"**
+Không. Đó là hệ quả đúng của giao thức đã chốt trước khi chạy: dùng nguyên cấu hình khoá
+từ MIMIC, không tuning lại theo IU. IU nhỏ hơn nhiều và mô hình gốc đã khớp tập quên gần
+như hoàn hảo (Df-AUC 1.000, forget-CE 0.002), nên cùng learning rate với 30 epoch là quá
+mạnh. Đây là một hạn chế đáng ghi, không phải lỗi.
+
+---
+
 ## Trạng thái
 
 Đủ **12/12 run**. Không còn thực nghiệm nào phải chạy theo danh sách tối thiểu.
+Không còn ô trống trong Bảng 1–5.
