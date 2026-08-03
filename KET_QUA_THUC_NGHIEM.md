@@ -29,8 +29,8 @@ python tools/build_tables.py "D:\Run_KLTN\2.8" --out-md bang.md
 - **S2** = selector *Closest CE* (gold-free): chọn epoch có `|forget_CE − nm_val_CE|` nhỏ nhất.
   Epoch ghi trong bảng đã quy về đếm-từ-1.
 - **E30** = checkpoint cuối cùng.
-- `—` = chưa chạy. `n/a` = có checkpoint nhưng metric không tính được (AUC = NaN khi
-  mô hình sụp đổ).
+- `—` = chưa chạy. (Bảng từng có `n/a` ở Df-AUC/Dt-AUC của P3 trên IU; nguyên nhân là
+  một lỗi trong hàm tính AUC, đã sửa và điền số thật — xem Phụ lục C mục 6.)
 - Ở hàng **S2**, cột cuối là **nm_val-CE** (đại lượng selector dùng), không phải Test-CE.
 - **Giao thức MIA** (thống nhất cho mọi hàng của cả hai phương pháp): member = `D_r` lấy
   mẫu còn **512** (`eval_max_retain`, seed 42), non-member = `D_t_final`, mục tiêu tấn
@@ -203,7 +203,7 @@ trong khi nm_val-CE chỉ 1.850, tức bắt đầu over-forget; S2 vì thế ch
 | Forget-MI | S2 | E30 | 0.854 | **0.616** | 0.635 | **0.533** | 0.581 | 0.167 | 3.019 | 3.565 |
 | Forget-MI | E30 | 30 | 0.854 | 0.616 | 0.635 | 0.533 | 0.581 | 0.167 | 3.019 | 3.661 |
 | **P3-NoKD-More** | S2 | E11 | 0.872 | 0.486 | **0.665** | 0.410 | 0.597 | **0.167** | 8.946 | 9.180 |
-| **P3-NoKD-More** | E30 | 30 | n/a | 0.334 | n/a | 0.351 | 0.560 | 0.000 | 37.771 | 28.553 |
+| **P3-NoKD-More** | E30 | 30 | **0.710** | 0.334 | 0.590 | 0.351 | **0.560** | **0.000** | 37.771 | 28.553 |
 
 | Mô hình | Tham số cập nhật | Tỉ lệ | T_Fisher | T_FILA | T_train | **T_core** | Peak alloc | Peak reserved |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -217,8 +217,22 @@ trong khi nm_val-CE chỉ 1.850, tức bắt đầu over-forget; S2 vì thế ch
 | forget-CE | 0.04 | 1.80 | 8.95 | 10.59 | 11.99 | 21.39 | 31.28 | **37.77** |
 | nm_val-CE | 2.50 | 4.28 | 9.18 | 10.09 | 10.65 | 16.69 | 23.44 | **27.97** |
 
-Gold chỉ ở mức 2.33. Tới E30 logit lớn đến mức **AUC không tính được** (`NaN`) và Dt-F1
-rơi từ 0.622 (θ_og) xuống 0.351 — mất năng lực chẩn đoán trên cả tập kiểm tra.
+Gold chỉ ở mức 2.33 — tức forget-CE của P3 cao gấp **16 lần** mức mà huấn luyện lại từ
+đầu đạt được.
+
+Hệ quả trên tập kiểm tra thể hiện khác nhau ở hai chỉ số, cần phân biệt:
+
+| | θ_og | P3 @E30 | |
+|---|---:|---:|---|
+| Dt-AUC | 0.676 | **0.590** | giảm nhưng vẫn trên 0.5 — thứ hạng dự đoán còn phần nào giữ được |
+| Dt-F1 | 0.622 | **0.351** | sụp mạnh — phân bố lớp dự đoán đã lệch hẳn |
+
+Đây là dấu hiệu điển hình của **quên quá đà**: mô hình vẫn xếp hạng được phần nào (AUC
+0.590) nhưng ngưỡng quyết định đã hỏng nên F1 rơi. Không nên mô tả là "mất hoàn toàn
+năng lực chẩn đoán".
+
+Ở trục quên, P3 lại **gần gold hơn Forget-MI rõ rệt**: Df-AUC 0.710 so với 0.854
+(gold 0.651, θ_og 1.000). Nói cách khác P3 quên nhiều hơn hẳn, và cái giá là tiện ích.
 
 Đây không phải lỗi cài đặt mà là hệ quả đúng của giao thức đã chốt: *dùng nguyên cấu
 hình P3-NoKD-More khóa từ MIMIC, không tuning lại theo IU*. IU nhỏ hơn nhiều và θ_og đã
@@ -227,6 +241,9 @@ với 30 epoch là quá mạnh. **Cần đưa vào phần hạn chế của khó
 
 S2 của Forget-MI trên IU chốt đúng **E30** nên hai hàng của nó trùng nhau (khác biệt duy
 nhất ở cột cuối là do hàng S2 ghi nm_val-CE 3.565 còn hàng E30 ghi Test-CE 3.661).
+
+**Tóm lại cho IU:** tại E30 P3 quên nhiều hơn Forget-MI (Df-AUC 0.710 vs 0.854, gần gold
+0.651 hơn) nhưng trả giá bằng tiện ích (Dt-AUC 0.590 vs 0.635); tại S2 thì ngược lại.
 
 Ở checkpoint S2 (E11) thì P3 còn dùng được: Dt-AUC 0.665 cao hơn Forget-MI 0.635 và sát
 gold 0.670, MIA_paper ngang nhau (0.167). Đổi lại Df-AUC 0.872 xa gold hơn (Forget-MI
@@ -329,7 +346,24 @@ Chương 4 — con số `≈1/17` cũ phải bỏ.
 10 % (MIA 0.730 còn cao hơn θ_og 0.717). Không được phát biểu "P3 tốt hơn Forget-MI" một
 cách tổng quát — phải nói theo từng mức quên **và** theo chốt checkpoint.
 
-**6. Kiểm tra tái lập bit-exact.** Run `p3_m3` (chạy lại P3-NoKD-More 3%) cho kết quả
+**6. Df-AUC/Dt-AUC của P3 trên IU tại E30 từng bị mất do LỖI HÀM METRIC, nay đã có số.**
+`compute_auc` tính Pairwise-AUC bằng `p[c1] / (p[c0] + p[c1])`. Logit ảnh của P3 tại E30
+trải `[−65.3, +68.6]`; softmax chạy trên FP32 nên `exp(−134)` underflow về **đúng 0.0** ở
+cả hai kênh → `0/0`. Vì là `float` của Python nên nó **ném `ZeroDivisionError`** thay vì
+trả `nan`, và lỗi rơi vào trước cả bước kiểm tra "cặp thiếu lớp". Tệ hơn, `perf_metrics`
+bọc AUC-theo-kênh và Pairwise-AUC trong **một** `try/except`, nên phần AUC-theo-kênh
+*đã tính xong* cũng mất theo.
+
+Đã sửa: chặn mẫu số bằng 0 (gán 0.5 — mẫu đó không phân biệt được hai lớp) và tách
+`try/except` cho hai đại lượng. Với biên độ logit thông thường, kết quả **trùng khít**
+bản cũ nên **không số nào trong Bảng 1–4 bị ảnh hưởng**.
+
+Xác nhận mô hình dựng lại đúng là mô hình lúc chạy thật: `Macro_F1` đo lại
+(0.3335 / 0.3507) **trùng khít** giá trị đã ghi trong bảng (0.334 / 0.351), trong khi
+AUC chuyển từ `NaN` sang 0.710 / 0.590. Số dùng trong Bảng 5 lấy ở chế độ autocast FP16
+— đúng chế độ mọi hàng khác đã chạy; bản FP32 chênh không đáng kể (0.7098 / 0.58965).
+
+**7. Kiểm tra tái lập bit-exact.** Run `p3_m3` (chạy lại P3-NoKD-More 3%) cho kết quả
 **trùng khít từng chữ số** với run gốc: forget-CE tại E1/E11/E30 = 1.9197 / 1.9334 /
 2.0671 ở cả hai, S2 giống nhau đến 4 chữ số thập phân. Nguyên nhân là
 `AlignedSampler.__iter__` gọi `torch.manual_seed(42)` ở đầu mỗi epoch nên RNG được ghim
