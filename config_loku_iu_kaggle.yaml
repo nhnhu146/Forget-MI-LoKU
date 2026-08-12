@@ -38,8 +38,21 @@ parameters:
   text_noise_level:
     value: 0.5
   output_channel_encoding:
-    value: "multiclass"                                      # IU binary 0/1 qua head 4-class
-                                                             # ('binary' không được loader hỗ trợ)
+    value: "multiclass"                                      # 'binary' không được loader hỗ trợ
+
+  # ===== KHÔNG GIAN NHÃN (xem joint_img_txt/label_space.py) =====
+  # num_labels        = ĐỘ RỘNG HEAD, phải khớp checkpoint model_og_IU / model_retrained_iu.
+  #                     Giữ 4 vì hai checkpoint đó được train với head 4 kênh (kế thừa MIMIC).
+  # num_active_classes = KHÔNG GIAN QUYẾT ĐỊNH. IU là nhị phân (0=normal, 1=abnormal) nên
+  #                     kênh 2,3 là LỚP CHẾT: không bao giờ có trong nhãn. Đặt =2 để loại
+  #                     chúng khỏi IHL + CE + KD + Fisher + AUC/F1 + CE của MIA.
+  #                     Nếu KHÔNG đặt, IHL có thể "quên" bằng cách dồn xác suất sang lớp 2/3
+  #                     mà quyết định normal/abnormal không đổi → quên GIẢ.
+  # ĐƯỜNG LUI: xoá dòng num_active_classes → quay lại y hệt hành vi cũ (4 kênh).
+  num_labels:
+    value: 4
+  num_active_classes:
+    value: 2
   reprocess_input_data:
     value: false
   validation_ratio:

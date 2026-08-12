@@ -3,6 +3,7 @@ Authors: Geeticka Chauhan, Ruizhi Liao
 
 This script contains metrics for evaluating model predictions
 '''
+from itertools import combinations
 from scipy.stats import logistic
 from sklearn.metrics import precision_recall_fscore_support, accuracy_score, confusion_matrix, auc, roc_curve
 from sklearn.metrics import mean_squared_error as mse
@@ -159,12 +160,12 @@ def compute_auc(labels, preds, output_channel_encoding='multilabel'):
             # Proceed with AUC calculation if we have both classes
             fpr, tpr, thresholds = roc_curve(y, pred, pos_label=1)
             return round(auc(fpr, tpr), 4)
-        pairwise_aucs['0v1'] = compute_pairwise_auc(labels, preds, 0, 1)
-        pairwise_aucs['0v2'] = compute_pairwise_auc(labels, preds, 0, 2)
-        pairwise_aucs['0v3'] = compute_pairwise_auc(labels, preds, 0, 3)
-        pairwise_aucs['1v2'] = compute_pairwise_auc(labels, preds, 1, 2)
-        pairwise_aucs['1v3'] = compute_pairwise_auc(labels, preds, 1, 3)
-        pairwise_aucs['2v3'] = compute_pairwise_auc(labels, preds, 2, 3)
+        # Sinh cặp từ số kênh THỰC TẾ của dữ liệu truyền vào thay vì liệt kê tay 6 cặp
+        # của head 4 lớp. Với num_channels=4, itertools.combinations trả đúng thứ tự cũ
+        # (0v1, 0v2, 0v3, 1v2, 1v3, 2v3) → MIMIC bất biến. Với num_channels=2 (IU sau khi
+        # cắt kênh chết) chỉ còn 0v1 hợp lệ — trước đây 5 cặp kia hoặc NaN hoặc IndexError.
+        for c0, c1 in combinations(range(num_channels), 2):
+            pairwise_aucs[f'{c0}v{c1}'] = compute_pairwise_auc(labels, preds, c0, c1)
 
     return aucs, pairwise_aucs
 

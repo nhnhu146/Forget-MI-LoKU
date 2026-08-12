@@ -40,6 +40,7 @@ from tqdm import tqdm
 from transformers import BertTokenizer
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from joint_img_txt import label_space
 from joint_img_txt.model import ImageTextModel
 from training.forgetmi_partial import (
     _load_config, _init_wandb, build_dataset, get_model_inputs, _final_evaluation,
@@ -63,9 +64,13 @@ def _set_seed(s):
         torch.cuda.manual_seed_all(s)
 
 
-def _ce(outputs, labels):
-    """CE trên image logits (outputs[1]) + text logits (outputs[3])."""
-    return F.cross_entropy(outputs[1], labels) + F.cross_entropy(outputs[3], labels)
+def _ce(outputs, labels, ls=None):
+    """CE trên image logits (outputs[1]) + text logits (outputs[3]).
+
+    `ls` = LabelSpace: cắt kênh chết để NegGrad+/CF-k/EU-k tối ưu trên đúng không gian
+    quyết định của dataset (IU nhị phân), giống P3 và baseline Forget-MI. ls=None → cũ."""
+    return (F.cross_entropy(label_space.slice_logits(outputs[1], ls), labels)
+            + F.cross_entropy(label_space.slice_logits(outputs[3], ls), labels))
 
 
 def _freeze_first_k(model):
@@ -175,6 +180,7 @@ def main():
     if cli.method == 'neggrad':
         print(f"   NegGrad+ lambda(forget) = {neg_lambda:.4f}")
 
+    _ls = label_space.resolve(config)   # no-op khi config không có num_active_classes
     model_ul.train()
     t0 = time.time()
     print(f"\n{'=' * 70}\n🚂 {cli.method.upper()} — epochs={cli.epochs} lr={lr} bs={bs}\n{'=' * 70}")
@@ -192,7 +198,7 @@ def main():
                 optimizer.zero_grad()
                 r_out = model_ul(**r_in)
                 f_out = model_ul(**f_in)
-                loss = _ce(r_out, r_lab) - neg_lambda * _ce(f_out, f_lab)
+                loss = _ce(r_out, r_lab, _ls) - neg_lambda * _ce(f_out, f_lab, _ls)
                 loss.backward()
                 nn.utils.clip_grad_norm_(params, max_grad_norm)
                 optimizer.step()
@@ -206,7 +212,7 @@ def main():
                 r_lab = r_lab.long().view(-1)
                 optimizer.zero_grad()
                 r_out = model_ul(**r_in)
-                loss = _ce(r_out, r_lab)
+                loss = _ce(r_out, r_lab, _ls)
                 loss.backward()
                 nn.utils.clip_grad_norm_(params, max_grad_norm)
                 optimizer.step()

@@ -77,6 +77,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Sampler, Subset
 
+from joint_img_txt import label_space
 from joint_img_txt.model_utils import (
     CXRImageTextDataset, EdemaClassificationProcessor, EdemaMultiLabelClassificationProcessor,
     RandomTranslateCrop, CenterCrop,
@@ -470,7 +471,7 @@ def _writable_cache_dir():
 def _make_processor(args):
     return (EdemaMultiLabelClassificationProcessor()
             if args.output_channel_encoding == 'multilabel'
-            else EdemaClassificationProcessor())
+            else EdemaClassificationProcessor(label_space.resolve(args).n_labels))
 
 
 def _regen_text_features(args, tokenizer, dst_dir):
@@ -611,6 +612,7 @@ def build_dataset(args, tokenizer):
             args.data_split_path, transform=trans,
             perturb_img=perturb, noise_params=(image_noise_params if perturb else None),
             output_channel_encoding=args.output_channel_encoding,
+            num_labels=num_labels,
         )
         print(f"  [{name}] {len(datasets[name])} samples")
     # Fail-fast rõ ràng nếu tập cốt lõi rỗng (thay vì lỗi 'need at least one array' sâu ở eval).
@@ -648,6 +650,7 @@ def compute_fisher_importance(model, dataloader, device, target_modules, args,
         print("⚠️  Không có tham số mục tiêu cho Fisher. Trả zeros.")
         return importance
     n = 0
+    _fisher_ls = label_space.resolve(args)
     for batch in tqdm(dataloader, desc="Fisher(per-sample)"):
         if n >= max_samples:
             break
@@ -659,9 +662,12 @@ def compute_fisher_importance(model, dataloader, device, target_modules, args,
         for i in range(bs):
             if n >= max_samples:
                 break
-            # ℓ_i của RIÊNG mẫu i (không lấy trung bình batch)
-            loss_i = (F.cross_entropy(img_logits[i:i + 1], labels[i:i + 1])
-                      + F.cross_entropy(txt_logits[i:i + 1], labels[i:i + 1]))
+            # ℓ_i của RIÊNG mẫu i (không lấy trung bình batch). Cắt kênh chết để Fisher
+            # đo độ quan trọng theo ĐÚNG bài toán, không kèm gradient của lớp không tồn tại.
+            loss_i = (F.cross_entropy(label_space.slice_logits(img_logits[i:i + 1], _fisher_ls),
+                                      labels[i:i + 1])
+                      + F.cross_entropy(label_space.slice_logits(txt_logits[i:i + 1], _fisher_ls),
+                                        labels[i:i + 1]))
             grads = torch.autograd.grad(loss_i, plist, retain_graph=(i < bs - 1),
                                         allow_unused=True)
             for name, g in zip(names, grads):
@@ -899,7 +905,10 @@ def subsample_dataset(dataset, max_n, seed=42):
 
 @torch.no_grad()
 def per_sample_ce(model, dataset, device, args, batch_size=32):
-    """CE per-sample trên img_logits (đặc trưng MIA nhánh ảnh)."""
+    """CE per-sample trên img_logits (đặc trưng MIA nhánh ảnh).
+
+    Chỉ tính trên các kênh ACTIVE → thang CE khớp số lớp thật của dataset."""
+    ls = label_space.resolve(args)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     out = []
     model.eval()
@@ -908,7 +917,7 @@ def per_sample_ce(model, dataset, device, args, batch_size=32):
         inputs, labels, _ = get_model_inputs(args, batch, device)
         with _eval_autocast():
             outputs = safe_forward(model, inputs)
-        logits = outputs[1].float()
+        logits = label_space.slice_logits(outputs[1].float(), ls)
         losses = F.cross_entropy(logits, labels.long().view(-1), reduction='none')
         out.append(losses.cpu().numpy())
     return np.concatenate(out) if out else np.array([])
@@ -983,10 +992,14 @@ def cosine_sim_models(model_a, model_b, dataset, device, args, batch_size=32):
 @torch.no_grad()
 def perf_metrics(model, dataset, device, args, batch_size=32, num_classes=4):
     """AUC + Macro-F1 + F1 + Accuracy + PAIRWISE-AUC (đủ metric Forget-MI).
-    Forget-MI báo cáo cả Pairwise-AUC (dict 0v1..2v3) → ta surface lại (mean + dict)."""
+    Forget-MI báo cáo cả Pairwise-AUC (dict 0v1..2v3) → ta surface lại (mean + dict).
+
+    Kênh chết (>= num_active_classes) bị cắt trước softmax; với IU nhị phân, dict
+    pairwise chỉ còn đúng một cặp 0v1 thay vì 1 cặp hợp lệ + 5 cặp NaN."""
     from joint_img_txt.metrics import compute_auc, get_acc_f1
     from scipy.special import softmax
     from scipy.stats import logistic
+    ls = label_space.resolve(args, default_num_labels=num_classes)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     all_logits, all_labels_oh = [], []
     model.eval()
@@ -1000,12 +1013,16 @@ def perf_metrics(model, dataset, device, args, batch_size=32, num_classes=4):
         oh_np = label_oh.cpu().numpy()
         if oh_np.ndim == 1 or oh_np.shape[-1] == 1:
             raw = oh_np.flatten().astype(int)
-            oh_np = np.eye(num_classes)[np.clip(raw, 0, num_classes - 1)]
+            oh_np = np.eye(ls.n_labels)[np.clip(raw, 0, ls.n_labels - 1)]
         all_labels_oh.append(oh_np.astype(int))
     logits = np.concatenate(all_logits, axis=0)
     labels_oh = np.concatenate(all_labels_oh, axis=0)
-    probs = (logistic.cdf(logits) if args.output_channel_encoding == 'multilabel'
-             else softmax(logits, axis=1))
+    if args.output_channel_encoding == 'multilabel':
+        probs = logistic.cdf(logits)
+    else:
+        logits = label_space.slice_logits(logits, ls)
+        labels_oh = label_space.slice_onehot(labels_oh, ls)
+        probs = softmax(logits, axis=1)
     # AUC theo kênh và Pairwise-AUC phải bọc try/except RIÊNG. Trước đây chung một khối:
     # phần pairwise ném lỗi (ví dụ ZeroDivisionError khi softmax FP32 underflow về 0) là
     # mất luôn AUC theo kênh vốn đã tính xong — chính là nguyên nhân P3 trên IU tại E30
@@ -1062,7 +1079,7 @@ def eval_forget_losses(model_ul, model_og, forget_dl, rand_dl, args, device, ctx
         _, _, st = forget_distance(ul_i, ul_t, ul_j, og_i, og_t, og_j)
         # IHL = 1 + p(true) − max_{v≠true} p(v)  (bounded [0,2])
         f_y = f_lbl.long().view(-1)
-        ihl = inverted_hinge_loss(ul_il, ul_tl, f_y)
+        ihl = inverted_hinge_loss(ul_il, ul_tl, f_y, ls=label_space.resolve(args))
         bs = fb[0].size(0)
         ihl_s += float(ihl) * bs
         du_s += st['d_u_mean'] * bs; dm_s += st['d_m_mean'] * bs; n += bs
@@ -1106,10 +1123,15 @@ def compute_S_val(forget_losses, mia_val, ul_perf, og_perf, ref_scales, weights,
 # Losses dùng chung (IHL) — sao y LoKU (bounded [0,2])
 # ============================================================================
 
-def inverted_hinge_loss(img_logits, txt_logits, y):
+def inverted_hinge_loss(img_logits, txt_logits, y, ls=None):
     """L_IHL = 1 + p(true) − max_{v≠true} p(v), lấy trung bình img+txt. Bounded [0,2].
-    (LoKU multiclass_hinge_loss dạng crammer-singer, clamp(1+margin,0).)"""
+    (LoKU multiclass_hinge_loss dạng crammer-singer, clamp(1+margin,0).)
+
+    `ls` = LabelSpace. Khi có kênh chết, `max_{v≠true}` PHẢI bị giới hạn trong các lớp
+    có thật: nếu không, model dồn xác suất sang lớp không tồn tại là IHL giảm mà quyết
+    định phân loại không đổi → quên giả. ls=None → hành vi cũ."""
     def _one(logits):
+        logits = label_space.slice_logits(logits, ls)
         n_cls = logits.size(-1)
         probs = F.softmax(logits, dim=-1)
         mask = F.one_hot(y, n_cls).bool()
@@ -1152,6 +1174,7 @@ def combined_batch_loss(cfg, ctx, fb, rb, retb, device, weights,
     KD teacher=og (honest). Fusion gate: TẠO MỚI theo từng batch, riêng từng vai trò,
     không nằm trong optimizer — bám cấu trúc triển khai của code gốc Forget-MI."""
     lam_ur, lam_uu, lam_mu, lam_mr, lam_ce, lam_kd, lam_ihl = weights
+    ls = label_space.resolve(cfg)   # no-op khi không khai báo num_active_classes
     model_ul = ctx['model_unlearn']; model_og = ctx['model_og']
 
     ret_in, ret_lbl, _ = get_model_inputs(cfg, retb, device)
@@ -1176,9 +1199,13 @@ def combined_batch_loss(cfg, ctx, fb, rb, retb, device, weights,
 
     # ----- CE + KD trên retain -----
     ret_y = ret_lbl.long().view(-1)
-    L_ce = 0.5 * (F.cross_entropy(ul_ret_il, ret_y) + F.cross_entropy(ul_ret_tl, ret_y))
+    # CE/KD chạy trên cùng không gian quyết định với IHL (các kênh ACTIVE).
+    L_ce = 0.5 * (F.cross_entropy(label_space.slice_logits(ul_ret_il, ls), ret_y)
+                  + F.cross_entropy(label_space.slice_logits(ul_ret_tl, ls), ret_y))
     T = float(getattr(cfg, 'distill_temperature', 2.0))
     def _kl(student, teacher):
+        student = label_space.slice_logits(student, ls)
+        teacher = label_space.slice_logits(teacher, ls)
         return F.kl_div(F.log_softmax(student / T, dim=-1),
                         F.softmax(teacher / T, dim=-1).detach(),
                         reduction='batchmean') * (T * T)
@@ -1200,7 +1227,7 @@ def combined_batch_loss(cfg, ctx, fb, rb, retb, device, weights,
         ul_frg_j = gates['ul_frg'](ul_frg_i, ul_frg_t)
         og_rnd_j = gates['og_rnd'](og_rnd_i, og_rnd_t)
         f_y = f_lbl.long().view(-1)
-        L_ihl = inverted_hinge_loss(ul_frg_il, ul_frg_tl, f_y)
+        L_ihl = inverted_hinge_loss(ul_frg_il, ul_frg_tl, f_y, ls=ls)
         comp['IHL'] = L_ihl.item()
         if forget_active:
             L_uu, L_mu, hstats = forget_distance(ul_frg_i, ul_frg_t, ul_frg_j,
@@ -1475,6 +1502,8 @@ def build_base_models(cfg, device):
     base_p = ensure_model_path(cfg.base_model_path, "base")
     re_p = ensure_model_path(cfg.retrained_model_path, "retrained")
     model_og = ImageTextModel.from_pretrained(base_p).to(device)
+    label_space.assert_head_width(model_og, label_space.resolve(cfg), 'base_model_path')
+    print(label_space.describe(cfg))
     model_unlearn = ImageTextModel.from_pretrained(base_p).to(device)
     try:
         model_re = ImageTextModel.from_pretrained(re_p).to(device).half()

@@ -54,9 +54,17 @@ parameters:
   text_noise_level:
     value: 0.5
   output_channel_encoding:
-    value: "multiclass"                                      # IU binary 0/1 đi qua head 4-class
-                                                             # (convert_to_onehot). 'binary' KHÔNG
-                                                             # được data loader hỗ trợ → sẽ crash.
+    value: "multiclass"                                      # 'binary' KHÔNG được data loader
+                                                             # hỗ trợ → sẽ crash.
+
+  # ===== KHÔNG GIAN NHÃN (xem joint_img_txt/label_space.py) =====
+  # Phải TRÙNG config_loku_iu_kaggle.yaml để baseline và P3 đánh giá trên cùng một
+  # không gian quyết định. num_labels=4 (khớp checkpoint IU), active=2 (IU nhị phân).
+  # ĐƯỜNG LUI: xoá dòng num_active_classes → quay lại y hệt hành vi cũ (4 kênh).
+  num_labels:
+    value: 4
+  num_active_classes:
+    value: 2
   reprocess_input_data:
     value: false
   validation_ratio:

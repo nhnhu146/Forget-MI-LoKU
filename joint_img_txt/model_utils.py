@@ -12,6 +12,7 @@ import sys
 import logging
 from scipy.stats import logistic
 import numpy as np
+from joint_img_txt.label_space import DEFAULT_NUM_LABELS
 from skimage import io
 import scipy.ndimage as ndimage
 from shutil import copyfile
@@ -176,10 +177,18 @@ class InputExample(object):
 
 
 class EdemaClassificationProcessor(DataProcessor):
-    """Processor for multi class classification dataset. 
+    """Processor for multi class classification dataset.
     Assume reading from a multiclass file
     so the label will be in 0-3 format
+
+    `num_labels` = ĐỘ RỘNG HEAD (mặc định 4 → hành vi cũ, MIMIC edema 0..3). Chỉ hạ
+    xuống 2 khi checkpoint cũng được train với head 2 kênh — xem joint_img_txt/label_space.py.
+    Muốn thu hẹp KHÔNG GIAN QUYẾT ĐỊNH mà giữ checkpoint 4 kênh thì dùng
+    `num_active_classes`, KHÔNG đụng vào đây.
     """
+
+    def __init__(self, num_labels=DEFAULT_NUM_LABELS):
+        self.num_labels = int(num_labels)
 
     def get_train_examples(self, data_dir):
         """See base class."""
@@ -203,9 +212,9 @@ class EdemaClassificationProcessor(DataProcessor):
             synonyms_df, noise_level)
 
     def get_labels(self):
-        """See base class."""
-        return ["0", "1", "2", "3"]
-    
+        """See base class. Mặc định ["0","1","2","3"] — y hệt trước."""
+        return [str(i) for i in range(self.num_labels)]
+
     def _create_noisy_examples(self, lines, set_type, synonyms_df, noise_level):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -492,19 +501,18 @@ class CenterCrop(object):
         return image
 
 # Convert edema severity to one-hot encoding
-def convert_to_onehot(severity):
-    if int(severity) == 0:
-        return [1,0,0,0]
-    elif int(severity) == 1:
-        return [0,1,0,0]
-    elif int(severity) == 2:
-        return [0,0,1,0]
-    elif int(severity) == 3:
-        return [0,0,0,1]
-    elif int(severity) == -1:
-        return [-1,-1,-1,-1]
-    else:
-        raise Exception("No other possibilities of one-hot labels are possible")
+def convert_to_onehot(severity, num_classes=DEFAULT_NUM_LABELS):
+    """One-hot độ dài `num_classes`. Mặc định 4 → giữ nguyên hành vi cũ từng bit
+    (MIMIC-CXR edema 0..3). `-1` là sentinel 'thiếu nhãn' → vector toàn -1."""
+    s = int(severity)
+    if s == -1:
+        return [-1] * num_classes
+    if not (0 <= s < num_classes):
+        raise Exception(
+            f"Nhãn {s} nằm ngoài [0, {num_classes}) — không tạo được one-hot")
+    onehot = [0] * num_classes
+    onehot[s] = 1
+    return onehot
 
 # Convert edema severity to ordinal encoding
 def convert_to_ordinal(severity):
@@ -538,7 +546,8 @@ class CXRImageTextDataset(Dataset):
     def __init__(self, model_id , all_txt_tokens, 
                  all_txt_masks, all_txt_segments, all_txt_labels,
                  all_img_txt_ids, img_dir, all_img_labels, dataset_split_path, transform=None,
-                 perturb_img=False, noise_params=None, output_channel_encoding='multilabel'):
+                 perturb_img=False, noise_params=None, output_channel_encoding='multilabel',
+                 num_labels=DEFAULT_NUM_LABELS):
         """
         Args:
             csv_file (string): Path to the csv file with annotations.
@@ -557,6 +566,7 @@ class CXRImageTextDataset(Dataset):
         self.perturb_img = perturb_img
         self.noise_params = noise_params
         self.output_channel_encoding = output_channel_encoding
+        self.num_labels = int(num_labels)   # độ rộng one-hot; 4 = hành vi cũ
         self.dataset_split_path = dataset_split_path
         self.img_format = '.jpg'
 
@@ -611,11 +621,14 @@ class CXRImageTextDataset(Dataset):
         if self.output_channel_encoding == 'multilabel':
             txt_label = torch.tensor(self.all_txt_labels[txt_key], dtype=torch.long)
         else:
-            # 'multiclass' AND 'binary' both map the integer severity to a 4-way one-hot.
-            # IU is a binary normal/abnormal task (labels 0/1), which is a strict subset of
-            # the 4-class head → classes 2,3 simply never appear. Using one branch here also
-            # removes a latent bug where 'binary' previously left txt_label undefined.
-            txt_label = torch.tensor(convert_to_onehot(self.all_txt_labels[txt_key]), dtype=torch.long)
+            # 'multiclass' AND 'binary' both map the integer severity to a one-hot of width
+            # self.num_labels (mặc định 4). IU is a binary normal/abnormal task (labels 0/1),
+            # a strict subset of the 4-class head → classes 2,3 simply never appear; chúng bị
+            # loại khỏi loss/độ đo bằng `num_active_classes` (xem joint_img_txt/label_space.py),
+            # KHÔNG phải ở đây. Using one branch here also removes a latent bug where 'binary'
+            # previously left txt_label undefined.
+            txt_label = torch.tensor(
+                convert_to_onehot(self.all_txt_labels[txt_key], self.num_labels), dtype=torch.long)
 
         # report_id is collated into an int tensor downstream. MIMIC ids are numeric strings;
         # IU ids look like "CXR349" → strip non-digits so int() doesn't crash on the prefix.

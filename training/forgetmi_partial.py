@@ -48,7 +48,7 @@ from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler, Tens
 import torch.optim.lr_scheduler as lr_scheduler
 
 import joint_img_txt.metrics as eval_metrics
-from joint_img_txt import main_utils, parser
+from joint_img_txt import main_utils, parser, label_space
 from training.joint_embedding import Gate, Outer, Attention
 
 
@@ -131,7 +131,7 @@ def build_dataset(args, tokenizer, image_noise_params=None):
     '''
     processor = EdemaMultiLabelClassificationProcessor() \
         if args.output_channel_encoding == 'multilabel' \
-        else EdemaClassificationProcessor()
+        else EdemaClassificationProcessor(label_space.resolve(args).n_labels)
     num_labels = len(processor.get_labels())
 
     if args.output_channel_encoding == 'multilabel':
@@ -297,31 +297,31 @@ def build_dataset(args, tokenizer, image_noise_params=None):
                                   all_txt_tokens, all_txt_masks, all_txt_segments, 
                                   all_txt_labels, retain_img_txt_ids, args.img_data_dir, 
                                   retain_img_labels, dataset_split_path=args.data_split_path, transform=xray_transform,
-                                  output_channel_encoding = args.output_channel_encoding)
+                                  output_channel_encoding = args.output_channel_encoding, num_labels=num_labels)
 
     test_dataset = CXRImageTextDataset(args.id, 
                                   all_txt_tokens, all_txt_masks, all_txt_segments, 
                                   all_txt_labels, test_img_txt_ids, args.img_data_dir, 
                                   test_img_labels, dataset_split_path=args.data_split_path, transform=xray_transform, 
-                                  output_channel_encoding = args.output_channel_encoding)
+                                  output_channel_encoding = args.output_channel_encoding, num_labels=num_labels)
 
     rand_dataset = CXRImageTextDataset(args.id, 
                                   noisy_txt_tokens, noisy_txt_masks, noisy_txt_segments, 
                                   noisy_txt_labels, rand_img_txt_ids, args.img_data_dir, 
                                   rand_img_labels, dataset_split_path=args.data_split_path, transform=xray_transform, perturb_img=True,
-                                  noise_params=image_noise_params, output_channel_encoding = args.output_channel_encoding)
+                                  noise_params=image_noise_params, output_channel_encoding = args.output_channel_encoding, num_labels=num_labels)
 
     forget_dataset = CXRImageTextDataset(args.id, 
                                   all_txt_tokens, all_txt_masks, all_txt_segments, 
                                   all_txt_labels, forget_img_txt_ids, args.img_data_dir, 
                                   forget_img_labels, dataset_split_path=args.data_split_path, transform=xray_transform, 
-                                  output_channel_encoding = args.output_channel_encoding)
+                                  output_channel_encoding = args.output_channel_encoding, num_labels=num_labels)
 
     val_dataset = CXRImageTextDataset(args.id,
                                 all_txt_tokens, all_txt_masks, all_txt_segments,
                                 all_txt_labels, val_img_txt_ids, args.img_data_dir,
                                 val_img_labels, dataset_split_path=args.data_split_path, transform=xray_transform,
-                                output_channel_encoding=args.output_channel_encoding)
+                                output_channel_encoding=args.output_channel_encoding, num_labels=num_labels)
 
     # D_nm_val cho selector S1–S4 (25% test, og chưa từng thấy). KHÔNG dùng để train, chỉ
     # để đo nm_val_ce + utility → dùng CenterCrop (tất định) ĐÚNG NHƯ P3 dùng cho tập `sel`,
@@ -331,7 +331,7 @@ def build_dataset(args, tokenizer, image_noise_params=None):
                                 all_txt_labels, sel_img_txt_ids, args.img_data_dir,
                                 sel_img_labels, dataset_split_path=args.data_split_path,
                                 transform=CenterCrop(2048),
-                                output_channel_encoding=args.output_channel_encoding)
+                                output_channel_encoding=args.output_channel_encoding, num_labels=num_labels)
 
     print(f"Datasets: retain={len(retain_dataset)} val={len(val_dataset)} test={len(test_dataset)} "
           f"forget={len(forget_dataset)} random={len(rand_dataset)} sel={len(sel_dataset)}")
@@ -1327,6 +1327,8 @@ def main():
     _load_start = time.time()
     print(f"📦 Loading models...")
     model_og = ImageTextModel.from_pretrained(config.base_model_path).to(device)
+    label_space.assert_head_width(model_og, label_space.resolve(config), 'base_model_path')
+    print(label_space.describe(config))
     model_unlearn = copy.deepcopy(model_og)
     # Try to load retrained; on failure fallback to model_og as dummy so the script
     # can still run (per-epoch CosSim eval will be vs model_og — meaningless but doesn't
