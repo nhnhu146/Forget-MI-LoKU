@@ -216,6 +216,16 @@ def collect_arrays(model, dataset, device, cfg, batch_size=32, num_classes=4):
     logits_img = np.concatenate(li, axis=0)
     logits_txt = np.concatenate(lt, axis=0)
     labels = np.concatenate(lab, axis=0)
+    # Chốt chặn tràn FP16. Autocast FP16 lúc eval là mặc định (giữ hành vi mọi run cũ),
+    # nhưng khi FILA trừ quá đà (γ>1) logit có thể vượt 65504 → inf → CE = NaN → SVC ném
+    # ValueError ở tận mia_scores, rất khó lần ngược. In ngay tại nguồn.
+    for nm, arr in (('logits_img', logits_img), ('logits_txt', logits_txt)):
+        bad = int((~np.isfinite(arr)).sum())
+        if bad:
+            fin = arr[np.isfinite(arr)]
+            print(f"   ⚠️  {nm}: {bad}/{arr.size} phần tử KHÔNG hữu hạn "
+                  f"(|max| hữu hạn = {np.abs(fin).max() if fin.size else float('nan'):.1f}) "
+                  f"→ tràn FP16. Chạy lại với override `eval_autocast=0` để eval FP32.")
     return {'logits_img': logits_img, 'logits_txt': logits_txt,
             'labels': labels, 'labels_oh': np.concatenate(oh, axis=0),
             'ce_img': per_sample_ce_np(logits_img, labels),
@@ -240,22 +250,34 @@ def evaluate_all_views(model, datasets, cfg, device, batch_size=None):
 
     rows = []
     for view in VIEWS:
-        f_mem, _ = view_features(A_mem, view)
-        f_non, p_non = view_features(A_non, view)
-        f_frg, p_frg = view_features(A_frg, view)
-        # scaler CHỈ bật cho khung nhìn gộp (2 chiều, hai đặc trưng khác thang).
-        # Khung nhìn 1 chiều phải để tắt: bật vào là lệch số cũ (xem test mục 5).
-        mia = mia_scores(f_mem, f_non, f_frg, seed=seed, scale=(f_frg.shape[1] > 1))
-        forget_m = perf_from_probs(p_frg, A_frg['labels_oh'], enc)
-        test_m = perf_from_probs(p_non, A_non['labels_oh'], enc)
-        rows.append({
-            'view': view,
-            'Df_AUC': forget_m['AUC'], 'Df_F1': forget_m['Macro_F1'],
-            'Dt_AUC': test_m['AUC'], 'Dt_F1': test_m['Macro_F1'],
-            'Df_Pairwise_AUC': forget_m['Pairwise_AUC'],
-            'Dt_Pairwise_AUC': test_m['Pairwise_AUC'],
-            **mia,
-        })
+        # Một khung nhìn hỏng KHÔNG được kéo đổ hai khung còn lại: trước đây NaN ở nhánh
+        # văn bản (tràn FP16) làm SVC ném ValueError giữa chừng → mất luôn cả dòng `img`
+        # vốn đã tính xong, và CSV rỗng vì chỉ ghi ở cuối. Giờ ghi NaN cho view hỏng.
+        try:
+            f_mem, _ = view_features(A_mem, view)
+            f_non, p_non = view_features(A_non, view)
+            f_frg, p_frg = view_features(A_frg, view)
+            # scaler CHỈ bật cho khung nhìn gộp (2 chiều, hai đặc trưng khác thang).
+            # Khung nhìn 1 chiều phải để tắt: bật vào là lệch số cũ (xem test mục 5).
+            mia = mia_scores(f_mem, f_non, f_frg, seed=seed, scale=(f_frg.shape[1] > 1))
+            forget_m = perf_from_probs(p_frg, A_frg['labels_oh'], enc)
+            test_m = perf_from_probs(p_non, A_non['labels_oh'], enc)
+            rows.append({
+                'view': view,
+                'Df_AUC': forget_m['AUC'], 'Df_F1': forget_m['Macro_F1'],
+                'Dt_AUC': test_m['AUC'], 'Dt_F1': test_m['Macro_F1'],
+                'Df_Pairwise_AUC': forget_m['Pairwise_AUC'],
+                'Dt_Pairwise_AUC': test_m['Pairwise_AUC'],
+                **mia,
+            })
+        except Exception as e:
+            print(f"   ⚠️  view={view} LỖI {type(e).__name__}: {e}")
+            print("       → ghi NaN cho khung nhìn này, hai khung còn lại vẫn chạy.")
+            nan = float('nan')
+            rows.append({'view': view, 'Df_AUC': nan, 'Df_F1': nan, 'Dt_AUC': nan,
+                         'Dt_F1': nan, 'Df_Pairwise_AUC': nan, 'Dt_Pairwise_AUC': nan,
+                         'MIA': nan, 'MIA_paper': nan, 'member_ce': nan,
+                         'nonmember_ce': nan, 'forget_ce': nan, 'error': type(e).__name__})
     return rows
 
 
@@ -370,6 +392,12 @@ def main():
     if cli.seed is not None:
         cfg_d['random_seed'] = int(cli.seed)
     cfg_d = C.apply_overrides(cfg_d, cli.override)
+
+    # `eval_autocast=0` → eval chạy FP32. Cần khi FILA trừ quá đà (γ>1) đẩy logit vượt
+    # ngưỡng FP16 (65504) → inf → CE NaN. adv_common có sẵn công tắc nhưng chưa main nào
+    # nối vào config, nên nối ở đây.
+    if 'eval_autocast' in cfg_d:
+        C.set_eval_autocast(C.as_bool(cfg_d['eval_autocast']))
 
     C.set_seed(int(cfg_d.get('random_seed', 42)))
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
