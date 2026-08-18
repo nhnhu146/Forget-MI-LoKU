@@ -1921,6 +1921,22 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
 
     # ----- CE-crossing selector gold-free (S1-S4) — bật bằng ce_selector=1. Dùng sel(=D_nm_val)
     # + test_final CÓ SẴN, eval bằng hàm của adv_common, snapshot LoRA (trainable_state, ~2MB). -----
+    # ----- skip_selection=1: BO HAN khau chon checkpoint moi epoch -----
+    # CANH BAO: S_val khong chi dung de chon checkpoint. No con nuoi
+    # ReduceLROnPlateau(mode='min', factor=0.5, patience=2) qua sched.epoch_step(S_val).
+    # Tat no => plateau KHONG BAO GIO step => LR giu nguyen base sau warmup, tuc la
+    # MOT QUY TRINH TOI UU KHAC. Chi so sanh duoc voi run cung dat co nay.
+    _skip_sel = as_bool(getattr(cfg, 'skip_selection', False))
+    if _skip_sel:
+        print('=' * 72)
+        print('skip_selection=1 -> BO S_val moi epoch. He qua:')
+        print('  - ReduceLROnPlateau KHONG hoat dong: LR = base co dinh sau warmup.')
+        print("  - KHONG co checkpoint 'selected'; CSV chi ra hang 'last' (E30).")
+        print('  - CHI so sanh duoc voi run khac cung co skip_selection=1.')
+        print('=' * 72)
+    if _skip_sel and as_bool(getattr(cfg, 'ce_selector', False)):
+        raise SystemExit('skip_selection=1 va ce_selector=1 loai tru nhau.')
+
     _ce_sel = None
     if as_bool(getattr(cfg, 'ce_selector', False)):
         from training.ce_selector_pilot import OnlineCESelector
@@ -1983,14 +1999,16 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
         peak_train = tuple(max(a, b) for a, b in zip(peak_train, get_gpu_peak()))
 
         # ---- T_selection: giao thức chọn checkpoint, KHÔNG tính vào T_core ----
-        reset_gpu_peak()
-        with CudaTimer() as _ts:
-            S = selection_metrics(model_ul, ctx['model_og'], datasets,
-                                  ctx['forget_dl'], ctx['rand_dl'], ctx['ref_scales'],
-                                  ctx['og_perf'], cfg, device, ctx=ctx)
-            sched.epoch_step(S['S_val'])
-        t_sel += _ts.elapsed
-        peak_sel = tuple(max(a, b) for a, b in zip(peak_sel, get_gpu_peak()))
+        S = None
+        if not _skip_sel:
+            reset_gpu_peak()
+            with CudaTimer() as _ts:
+                S = selection_metrics(model_ul, ctx['model_og'], datasets,
+                                      ctx['forget_dl'], ctx['rand_dl'], ctx['ref_scales'],
+                                      ctx['og_perf'], cfg, device, ctx=ctx)
+                sched.epoch_step(S['S_val'])
+            t_sel += _ts.elapsed
+            peak_sel = tuple(max(a, b) for a, b in zip(peak_sel, get_gpu_peak()))
 
         d_u0, d_m0 = ctx['ref_scales']
         print(f"[{method} E{epoch:02d}] loss={avg.get('Total', 0):+.3f} "
@@ -1998,8 +2016,9 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
               f"(d̄ {avg.get('d_u_mean', 0):.3f}/{avg.get('d_m_mean', 0):.2f} "
               f"vs d⁰ {d_u0:.3f}/{d_m0:.2f}) "
               f"CE={avg.get('CE', 0):.3f} KD={avg.get('KD', 0):.4f} IHL={avg.get('IHL', 0):.3f} "
-              f"| S_val={S['S_val']:.4f} (Gf={S['G_forget']:.3f} Gp={S['G_privacy']:.3f} "
-              f"Gu={S['G_utility']:.3f}) val_ce={S['val_ce']:.3f}")
+              + (f"| S_val={S['S_val']:.4f} (Gf={S['G_forget']:.3f} "
+                 f"Gp={S['G_privacy']:.3f} Gu={S['G_utility']:.3f}) "
+                 f"val_ce={S['val_ce']:.3f}" if S is not None else '| (skip_selection)'))
 
         # ---- 'CHỌN EPOCH TỐT NHẤT': eval mỗi epoch trên D_t_final (như tái lập Forget-MI) ----
         # CHẨN ĐOÁN, không phải selector: mục 10 nói rõ selector không cần full MIA/AUC/F1
@@ -2022,9 +2041,15 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
 
         # ---- lưu/snapshot checkpoint: mục 10 xếp vào T_selection, KHÔNG vào T_core ----
         with CudaTimer() as _tc:
-            save_ckpt(ctx['out_dir'], epoch, model_ul, optimizer, avg,
-                      filename='latest.pt', val_ce=S['val_ce'], s_val=S['S_val'])
-            sel_value = S[select_by]
+            # skip_selection: chi luu latest.pt o epoch CUOI (eval doc dung file nay)
+            # thay vi ghi 30 lan; va sel_value=inf nen isfinite() phia duoi luon False
+            # => 'best' khong bao gio cap nhat => khong co checkpoint 'selected'.
+            if (not _skip_sel) or epoch == int(cfg.unlearn_epochs) - 1:
+                save_ckpt(ctx['out_dir'], epoch, model_ul, optimizer, avg,
+                          filename='latest.pt',
+                          val_ce=(S['val_ce'] if S is not None else None),
+                          s_val=(S['S_val'] if S is not None else None))
+            sel_value = S[select_by] if S is not None else float('inf')
             # isfinite guard: checkpoint có S_val/val_ce = nan/inf KHÔNG BAO GIỜ được chọn.
             if np.isfinite(sel_value) and sel_value < best['sel_value']:
                 best.update({'sel_value': sel_value, 's_val': S['S_val'], 'epoch': epoch,
@@ -2035,13 +2060,19 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
         if history_csv:
             append_history_row(history_csv, {
                 'method': method, 'id': str(getattr(cfg, 'id', '')), 'seed': int(cfg.random_seed),
-                'epoch': epoch + 1, 'S_val': S['S_val'], 'G_forget': S['G_forget'],
-                'G_privacy': S['G_privacy'], 'G_utility': S['G_utility'], 'val_ce': S['val_ce'],
-                'mia_val': S['mia_val'], 'total_loss': avg.get('Total', 0),
+                'epoch': epoch + 1,
+                'S_val': (S['S_val'] if S is not None else ''),
+                'G_forget': (S['G_forget'] if S is not None else ''),
+                'G_privacy': (S['G_privacy'] if S is not None else ''),
+                'G_utility': (S['G_utility'] if S is not None else ''),
+                'val_ce': (S['val_ce'] if S is not None else ''),
+                'mia_val': (S['mia_val'] if S is not None else ''),
+                'total_loss': avg.get('Total', 0),
                 'ihl': avg.get('IHL', 0), 'uu': avg.get('UU', 0), 'mu': avg.get('MU', 0),
                 'd_u_mean': avg.get('d_u_mean', 0), 'd_m_mean': avg.get('d_m_mean', 0),
                 'ref_d_u': d_u0, 'ref_d_m': d_m0,
-                'sel_d_u': S.get('floss_d_u', 0), 'sel_d_m': S.get('floss_d_m', 0),
+                'sel_d_u': (S.get('floss_d_u', 0) if S is not None else ''),
+                'sel_d_m': (S.get('floss_d_m', 0) if S is not None else ''),
                 'ur': avg.get('UR', 0), 'mr': avg.get('MR', 0), 'ce': avg.get('CE', 0),
                 'kd': avg.get('KD', 0), 'cum_optimizer_steps': total_steps,
             })
@@ -2086,8 +2117,9 @@ def run_training(cfg, ctx, device, method, weight_fn, select_by='S_val'):
         'ckpt_seconds': float(t_ckpt),             # đã gộp trong selection_seconds
         'diagnostic_seconds': float(t_diag),       # ngoài core/selection/eval
         # Mục 3.3: T_pipeline chỉ so được khi hai bên CÙNG selector → ghi lại để đối chiếu.
-        'selector': f"{select_by}+ce_selector" if _ce_sel is not None else str(select_by),
-        'checkpoint_policy': 'last+selected',
+        'selector': ('none(skip_selection)' if _skip_sel else
+                     (f"{select_by}+ce_selector" if _ce_sel is not None else str(select_by))),
+        'checkpoint_policy': 'last' if _skip_sel else 'last+selected',
         'eval_seconds': 0.0,                       # điền ở finalize_and_eval
         'epoch_train_stat': est,
         'peaks': peaks,
