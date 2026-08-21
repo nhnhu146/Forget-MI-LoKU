@@ -85,6 +85,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 import pandas as pd
+import torch
 
 import training.adv_common as C
 from joint_img_txt.model_utils import CXRImageTextDataset, RandomTranslateCrop, CenterCrop
@@ -195,6 +196,39 @@ def build_dataset_e30(args, tokenizer):
 
     splits = data_split_original(args.data_split_path, args.forget_set_path)
 
+    # ---- KIỂM TRA + TÁI TẠO CACHE TEXT (sao y adv_common.build_dataset) ----
+    # BẮT BUỘC phải có. Cache trên Kaggle input là read-only và report_id trong đó có
+    # thể KHÔNG khớp study_id của split đang dùng → mọi tập lọc còn 0 mẫu.
+    # Bỏ khối này đi thì build_dataset_e30 chết với "Dataset rỗng" trong khi phép chia
+    # hoàn toàn đúng (đã dính đúng lỗi này ở lần chạy ref_m3 đầu tiên).
+    retain_ids = splits['retain'][0]
+    sample_ids = list(retain_ids.values())[:50]
+    matches = sum(1 for rid in sample_ids if _resolve(rid, all_txt))
+    if sample_ids and matches == 0:
+        wd = C._writable_cache_dir()
+        cache_fname, cache_noisy_fname = C._cache_names(args)
+        re_cached = os.path.join(wd, cache_fname)
+        re_cached_noisy = os.path.join(wd, cache_noisy_fname)
+        if os.path.exists(re_cached) and os.path.exists(re_cached_noisy):
+            print(f"⚠️  Cache mismatch (0/{len(sample_ids)}) → dùng lại regen cache tại {wd}")
+            features = torch.load(re_cached, weights_only=False)
+            noisy_features = torch.load(re_cached_noisy, weights_only=False)
+        else:
+            print(f"⚠️  Cache mismatch (0/{len(sample_ids)}) → regenerate từ all_data.tsv "
+                  f"sang {wd} (~5 phút)...")
+            features, noisy_features = C._regen_text_features(args, tokenizer, wd)
+        all_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id)
+                   for f in features}
+        noisy_txt = {f.report_id: (f.input_ids, f.input_mask, f.segment_ids, f.label_id)
+                     for f in noisy_features}
+        matches = sum(1 for rid in sample_ids if _resolve(rid, all_txt))
+        if matches == 0:
+            raise RuntimeError(
+                f"Sau regenerate vẫn 0/{len(sample_ids)} match. Kiểm tra data_split="
+                f"{args.data_split_path} và {args.text_data_dir}/all_data.tsv.")
+        print(f"   ✅ Sau regen: {matches}/{len(sample_ids)} match.")
+
+    # rand_txt phải lấy SAU khối trên: nếu regen thì noisy_txt đã được thay bằng bản mới.
     def extract(mapping, ids):
         t, m, s, l = {}, {}, {}, {}
         for rid in ids:
